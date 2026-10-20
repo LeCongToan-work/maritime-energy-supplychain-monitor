@@ -1,0 +1,17 @@
+# Environment & Secrets
+.venv/
+venv/
+.env
+*.pyc
+__pycache__/
+
+# Raw Data & Local Database
+data/raw/*.parquet
+data/raw/*.csv
+*.duckdb
+*.duckdb.wal
+
+# dbt Artifacts
+dbt_maritime/target/
+dbt_maritime/dbt_packages/
+dbt_maritime/logs/

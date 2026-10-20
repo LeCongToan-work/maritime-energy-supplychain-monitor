@@ -1,0 +1,5 @@
+event_id,event_name,start_date,end_date,primary_chokepoint,event_category,severity_level,description
+EVT_01,Ever Given Suez Canal Blockage,2021-03-23,2021-03-29,Suez Canal,Operational Accident,High,Tau container Ever Given mac can lam tac nghen kenh dao Suez trong 6 ngay
+EVT_02,Panama Canal Severe Drought Restrictions,2023-07-30,2024-05-15,Panama Canal,Climate & Weather,High,Han han El Nino khien muc nuoc ho Gatun giam ky luc buoc gioi han so luot tau qua kenh
+EVT_03,Red Sea & Bab el-Mandeb Maritime Crisis,2023-11-19,2026-10-19,Bab el-Mandeb Strait,Geopolitical Conflict,Critical,Cac cuoc tan cong tau thuong mai tren Bien Do buoc cac hang tau doi tuyen vong qua Mui Hao Vong
+EVT_04,Middle East Escalation & Hormuz Disruption,2026-02-28,2026-10-19,Strait of Hormuz,Geopolitical Conflict,Critical,Cang thang quan su tai Trung Dong tu cuoi thang 2/2026 gay gian doan luu thong tau Tanker va nhieu AIS tai Hormuz

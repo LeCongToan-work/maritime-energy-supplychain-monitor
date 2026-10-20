@@ -1,0 +1,11 @@
+dbt_maritime:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: '../data/maritime_dwh.duckdb'
+      threads: 4
+    prod_motherduck:
+      type: duckdb
+      path: 'md:maritime_dwh'
+      threads: 4
