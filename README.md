@@ -1,7 +1,7 @@
 <div align="center">
 
 # MARITIME SUPPLY CHAIN & ENERGY PRICE MONITOR
-### End-to-End Cloud-Native Lakehouse, Automated ELT Pipeline, Maritime Chokepoints & Fossil Fuel Analytics
+### Automated ELT Pipeline, Maritime Chokepoints & Fossil Fuel Analytics
 
 **Dự án Portfolio Kỹ thuật Dữ liệu — Chuyên ngành Xử lý Dữ liệu**  
 *Tác giả: **Lê Công Toàn***
