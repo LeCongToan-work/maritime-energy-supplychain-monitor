@@ -60,7 +60,7 @@ flowchart LR
 ```
 
 ### 1.1. Bối Cảnh & Mục Tiêu Dự Án
-* **Quy mô dữ liệu:** Theo dõi toàn diện **28 điểm nghẽn hàng hải chiến lược toàn cầu** (IMF PortWatch) kết hợp với chuỗi giá năng lượng giao ngay (U.S. EIA Brent Crude & Diesel ULSD) trong giai đoạn **5 năm (2021–2026)** với gần **60.000+ bản ghi giao thông** và **2.900+ bản ghi giá năng lượng**.
+* **Quy mô dữ liệu:** Theo dõi toàn diện **28 điểm nghẽn hàng hải chiến lược toàn cầu** (IMF PortWatch) kết hợp với chuỗi giá năng lượng (U.S. EIA Brent Crude & Diesel ULSD) trong giai đoạn **5 năm (2021–2026)** với gần **60.000+ bản ghi giao thông** và **2.900+ bản ghi giá năng lượng**.
 * **Giá trị mang lại:** Xây dựng một nền tảng kỹ thuật dữ liệu hoàn chỉnh, minh họa năng lực thiết kế kho dữ liệu hiện đại, tự động hóa toàn bộ quá trình trích xuất, lưu trữ, biến đổi và trực quan hóa phân tích mối quan hệ giữa ách tắc vận tải biển và biến động giá nhiên liệu toàn cầu.
 
 ### 1.2. Các Thách Thức Kỹ Thuật Đã Giải Quyết
