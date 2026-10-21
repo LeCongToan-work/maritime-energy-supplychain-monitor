@@ -106,7 +106,7 @@ flowchart LR
 
 Hệ thống biến đổi dữ liệu thông qua **dbt Core** theo cấu trúc 3 tầng chuẩn mực:
 
-1. **Staging Layer (`stg_*`):** Đổi tên trường chuẩn hóa, ép kiểu tường minh (`TRY_CAST`), lọc bỏ các bản ghi trùng lặp và chuẩn hóa định dạng ngày tháng.
+1. **Staging Layer (`stg_*`):** Đổi tên trường chuẩn hóa, ép kiểu (`TRY_CAST`), lọc bỏ các bản ghi trùng lặp và chuẩn hóa định dạng ngày tháng.
 2. **Intermediate Layer (`int_*`):** Thực hiện logic nghiệp vụ phức tạp, xử lý đồng bộ lịch biểu thời gian, tạo bảng lịch liên tục (calendar spine) và áp dụng chiến lược **Causal Forward-Fill** cho giá năng lượng.
 3. **Marts Layer (`fct_*` & `dim_*`):** Xây dựng các bảng Sự kiện (Fact Tables) và Chiều (Dimension Tables) theo mô hình chiều kim cương (Dimensional Modeling), phục vụ trực tiếp cho các truy vấn phân tích BI.
 
