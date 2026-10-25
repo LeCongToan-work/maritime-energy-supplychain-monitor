@@ -39,40 +39,19 @@
 7. **[7] FINDINGS:**
    * Tổng hợp có đánh số tất cả các phát hiện và lỗi cụ thể của dataset.
 
----
 
-## 3. Phân Tích Cột `area-name` Trong File EIA Energy
-
-### 3.1. Bản chất nghiệp vụ: Là chỗ bán / cảng xuất hàng (Loading Port / Pricing Hub), KHÔNG phải chỗ nhập dầu
-* Nhìn vào 2 trường đi kèm trong file là `process = "PF4"` và `process-name = "Spot Price FOB"`.
-* Trong thương mại dầu khí quốc tế (**Incoterms — Free On Board / FOB**), giá **Spot Price FOB** là mức giá giao ngay được định giá tại **cảng bốc hàng / trung tâm giao dịch xuất phát (Loading Terminal / Pricing Hub)** nơi người bán giao dầu lên tàu (chưa bao gồm cước tàu biển *Freight* và bảo hiểm *Insurance* tới cảng nhập khẩu).
-* Cụ thể với 2 chuỗi trong dự án:
-  1. **`duoarea = "ZEU"` (`series = "RBRTE"`, `product = "EPCBRENT"`)**: Là trung tâm định giá dầu thô **Châu Âu — Biển Bắc (`Europe` / Sullom Voe, Hound Point, Sture, Ekofisk, Teesport)**.
-  2. **`duoarea = "RGC"` (`series = "EER_EPD2DXL0_PF4_RGC_DPG"`, `product = "EPD2DXL0"`)**: Là trung tâm lọc hóa dầu & xuất khẩu đường biển **Bờ Vịnh Hoa Kỳ (`U.S. Gulf Coast` — PADD 3, gồm Texas & Louisiana)**.
-
-> **Nguồn tài liệu chuẩn:**
-> * **U.S. EIA Technical Notes — Petroleum & Other Liquids Spot Prices**: Định nghĩa rõ *"Spot price FOB (Free on Board) refers to the price charged at the producing/loading port before ocean freight and insurance to the importing destination."*
-> * **Fattouh, B. (2011)**, *"An Anatomy of the Crude Oil Pricing System"*, **Oxford Institute for Energy Studies (OIES)**, Working Paper WPM 40 — giải thích cấu trúc định giá các cụm FOB Pricing Hubs (North Sea Dated Brent và U.S. Gulf Coast Pipeline/Waterborne).
-
-### 3.2. Tại sao `area-name` bị `"NA"` (100% = 2,899/2,899 dòng)?
-* Đây là lỗi metadata của **U.S. EIA Open Data API v2** tại endpoint `/v2/petroleum/pri/spt/data/`: Khi EIA nâng cấp từ API v1 sang API v2, bảng danh mục vùng (`duoarea` lookup table) của nhánh `spt` không join nhãn tên vùng cho các mã vùng cấp PADD/Châu lục như `RGC` và `ZEU`, nên API trả cứng chuỗi `"NA"` ở trường `area-name`, dù thông tin tên vùng vẫn nằm nguyên trong `duoarea` và `series-description`.
-
-### 3.3. Có fill được không? -> Fill chính xác 100% (Deterministic Rule-based Imputation)
-Vì quan hệ giữa mã vùng `duoarea` và tên vùng `area-name` là **phụ thuộc hàm 1–1 (`duoarea -> area-name`)**, có thể khôi phục chính xác tuyệt đối 100% mà không có bất kỳ sai số thống kê nào:
-* `duoarea == "ZEU"` $\rightarrow$ `area-name = "Europe"`
-* `duoarea == "RGC"` $\rightarrow$ `area-name = "U.S. Gulf Coast"`
 
 ---
 
-## 4. Kết Quả Chạy Thực Tế `data_quality_checker.py`
+## 3. Kết Quả Chạy Thực Tế `data_quality_checker.py`
 
-### 4.1. Tập dữ liệu `eia_energy_prices_daily_raw.parquet` (`2,899 dòng × 12 cột`)
+### 3.1. Tập dữ liệu `eia_energy_prices_daily_raw.parquet` (`2,899 dòng × 12 cột`)
 * **[1] NULL**: 11/12 trường đầy đủ `100%`. Duy nhất trường `area-name` có giá trị `"NA"` ở toàn bộ `2,899/2,899` dòng (`100.00%`).
 * **[2] DUPLICATE**: `0` dòng trùng trên khóa `[period + series]`.
 * **[3] RULES**: `0` dòng vi phạm (định dạng ngày `YYYY-MM-DD`, `value > 0`, `units` khớp `series`).
 * **[4] COVERAGE**: Đủ `2/2` series từ `2021-01-04` đến `2026-10-14` (`RBRTE`: 1,458 dòng; `EER_EPD2DXL0_PF4_RGC_DPG`: 1,441 dòng). Lưu ý: **Chênh lệch 17 ngày giao dịch** giữa Châu Âu (UK Bank Holidays) và Hoa Kỳ (U.S. Federal Holidays), đồng thời không có Thứ Bảy, Chủ Nhật.
 
-### 4.2. Tập dữ liệu `imf_chokepoint_daily_raw.parquet` (`59,276 dòng × 22 cột`)
+### 3.2. Tập dữ liệu `imf_chokepoint_daily_raw.parquet` (`59,276 dòng × 22 cột`)
 * **[1] NULL**: `0` dòng thiếu trên toàn bộ 22 trường.
 * **[2] DUPLICATE**: `0` dòng trùng trên khóa `[date + portid]` và `[ObjectId]`.
 * **[4] COVERAGE**: Đã lấy đủ **28/28 chokepoints**, mỗi điểm nghẽn có đúng `2,117` ngày liên tục từ `2021-01-01` đến `2026-10-18`, `0` ngày bị đứt quãng.
@@ -83,7 +62,7 @@ Vì quan hệ giữa mã vùng `duoarea` và tên vùng `area-name` là **phụ 
 
 ---
 
-## 5. Đề Xuất Các Phương Án Xử Lý (Kèm Lý Do & Nguồn Bài Báo Khoa Học)
+## 4. Đề Xuất Các Phương Án Xử Lý (Kèm Lý Do & Nguồn Bài Báo Khoa Học)
 
 Dựa trên kết quả kiểm tra ở trên, có **3 vấn đề dữ liệu thực tế** cần xử lý khi xây dựng pipeline từ Bronze sang Silver/Intermediate:
 
