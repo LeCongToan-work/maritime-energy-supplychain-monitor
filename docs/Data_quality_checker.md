@@ -62,7 +62,7 @@
 
 ---
 
-## 4. Đề Xuất Các Phương Án Xử Lý (Kèm Lý Do & Nguồn Bài Báo Khoa Học)
+## 4. Đề Xuất Các Phương Án Xử Lý 
 
 Dựa trên kết quả kiểm tra ở trên, có **3 vấn đề dữ liệu thực tế** cần xử lý khi xây dựng pipeline từ Bronze sang Silver/Intermediate:
 
