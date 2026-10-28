@@ -1,0 +1,39 @@
+version: 2
+
+models:
+  - name: stg_eia_energy_prices
+    columns:
+      - name: area_name
+        description: "Ten khu vuc xuat hang, map tu duoarea (phuong an 1A)."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['Europe', 'U.S. Gulf Coast']
+      - name: price_value
+        tests:
+          - not_null
+      - name: period_date
+        tests:
+          - not_null
+
+  - name: stg_imf_chokepoint_daily
+    columns:
+      - name: capacity_cargo
+        description: "Tinh lai bang tong 4 nhom tau hang (phuong an 3A)."
+      - name: capacity
+        description: "Tinh lai bang capacity_cargo + capacity_tanker (phuong an 3A)."
+      - name: object_id
+        tests:
+          - unique
+          - not_null
+
+  - name: int_energy_prices_daily_filled
+    description: "Gia nang luong tren calendar spine lien tuc, causal forward-fill (phuong an 2A)."
+    columns:
+      - name: calendar_date
+        tests:
+          - not_null
+      - name: area_name
+        tests:
+          - not_null

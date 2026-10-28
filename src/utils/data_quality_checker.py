@@ -56,8 +56,8 @@ def negative(cols):
     return lambda df: (df[cols] < 0).any(axis=1)
 
 
-def not_equal_sum(total, parts):
-    return lambda df: df[total] != df[parts].sum(axis=1)
+def not_equal_sum(total, parts, tolerance=0):
+    return lambda df: (df[total] - df[parts].sum(axis=1)).abs() > tolerance
 
 
 def out_of_range(col, low, high):
@@ -135,12 +135,14 @@ IMF_SCHEMA = {
          not_equal_sum("n_cargo", ["n_container", "n_dry_bulk", "n_general_cargo", "n_roro"])),
         ("n_total = n_cargo + n_tanker", ["n_total", "n_cargo", "n_tanker"],
          not_equal_sum("n_total", ["n_cargo", "n_tanker"])),
-        ("capacity_cargo = tong capacity 4 nhom tau hang",
+        ("capacity_cargo = tong capacity 4 nhom tau hang (dung sai lam tron 3 tan)",
          ["capacity_cargo", "capacity_container", "capacity_dry_bulk", "capacity_general_cargo", "capacity_roro"],
          not_equal_sum("capacity_cargo",
-                       ["capacity_container", "capacity_dry_bulk", "capacity_general_cargo", "capacity_roro"])),
-        ("capacity = capacity_cargo + capacity_tanker", ["capacity", "capacity_cargo", "capacity_tanker"],
-         not_equal_sum("capacity", ["capacity_cargo", "capacity_tanker"])),
+                       ["capacity_container", "capacity_dry_bulk", "capacity_general_cargo", "capacity_roro"],
+                       tolerance=3)),
+        ("capacity = capacity_cargo + capacity_tanker (dung sai lam tron 1 tan)",
+         ["capacity", "capacity_cargo", "capacity_tanker"],
+         not_equal_sum("capacity", ["capacity_cargo", "capacity_tanker"], tolerance=1)),
         ("_ingested_at_utc dung dinh dang timestamp", ["_ingested_at_utc"], bad_timestamp("_ingested_at_utc")),
     ],
     "coverage": {
