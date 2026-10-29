@@ -1,14 +1,16 @@
 """
 load_to_motherduck.py
 ---------------------
-Day cac file Parquet tang Bronze (data/raw/*.parquet) len MotherDuck (goi Free).
+Day cac file Parquet cua ca 3 tang Medallion (Bronze `raw`, Silver `silver`, Gold `gold`)
+len MotherDuck Cloud (`maritime_dwh`).
 
   - Tao database `maritime_dwh` neu chua ton tai.
-  - Tao schema `raw`, nap moi file Parquet thanh 1 bang (CREATE OR REPLACE -> chay lai khong bi nhan doi du lieu).
+  - Tao cac schema `raw`, `silver`, `gold` va nap moi file Parquet thanh 1 bang
+    (CREATE OR REPLACE -> chay lai idempotent, khong bi nhan doi du lieu).
   - Doi chieu so dong local vs cloud sau khi nap.
 
 Yeu cau: bien moi truong MOTHERDUCK_TOKEN trong file .env
-Chay:    python -m src.load.load_to_motherduck
+Chay:    venv\\Scripts\\python.exe -m src.load.load_to_motherduck
 """
 
 import os
@@ -27,17 +29,27 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_RAW_DIR = PROJECT_ROOT / "data" / "raw"
 DATA_PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
+DATA_GOLD_DIR = PROJECT_ROOT / "data" / "gold"
 
 DATABASE_NAME = "maritime_dwh"
 
 # (schema, table_name) -> file Parquet local
 TABLES = {
+    # Tang Bronze (Raw)
     ("raw", "eia_energy_prices_daily"): DATA_RAW_DIR / "eia_energy_prices_daily_raw.parquet",
     ("raw", "imf_chokepoint_daily"): DATA_RAW_DIR / "imf_chokepoint_daily_raw.parquet",
+    # Tang Silver (Processed & Cleaned)
     ("silver", "stg_eia_energy_prices"): DATA_PROCESSED_DIR / "eia_energy_prices_staging.parquet",
     ("silver", "int_energy_prices_daily_filled"): DATA_PROCESSED_DIR / "eia_energy_prices_daily_filled.parquet",
     ("silver", "stg_imf_chokepoint_daily"): DATA_PROCESSED_DIR / "imf_chokepoint_daily_processed.parquet",
     ("silver", "int_maritime_energy_daily_joined"): DATA_PROCESSED_DIR / "maritime_energy_daily_joined.parquet",
+    # Tang Gold (Dimensional Models & BI Analytics Marts)
+    ("gold", "dim_chokepoints"): DATA_GOLD_DIR / "dim_chokepoints.parquet",
+    ("gold", "dim_geopolitical_events"): DATA_GOLD_DIR / "dim_geopolitical_events.parquet",
+    ("gold", "fct_energy_prices_daily"): DATA_GOLD_DIR / "fct_energy_prices_daily.parquet",
+    ("gold", "fct_chokepoint_transit_daily"): DATA_GOLD_DIR / "fct_chokepoint_transit_daily.parquet",
+    ("gold", "mart_chokepoint_energy_regime_daily"): DATA_GOLD_DIR / "mart_chokepoint_energy_regime_daily.parquet",
+    ("gold", "mart_red_sea_cape_rerouting_daily"): DATA_GOLD_DIR / "mart_red_sea_cape_rerouting_daily.parquet",
 }
 
 # Goi Free cho 10 GB storage. Chan o 1 GB de khong bao gio cham nguong tinh phi.
@@ -70,6 +82,7 @@ def connect_motherduck() -> duckdb.DuckDBPyConnection:
     con.execute(f"USE {DATABASE_NAME}")
     con.execute("CREATE SCHEMA IF NOT EXISTS raw")
     con.execute("CREATE SCHEMA IF NOT EXISTS silver")
+    con.execute("CREATE SCHEMA IF NOT EXISTS gold")
     return con
 
 

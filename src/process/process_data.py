@@ -153,15 +153,26 @@ def build_processed_layer() -> None:
 
         # -------------------------------------------------------------------
         # 3. Phuong an 2A: Causal Forward-Fill (LOCF) tren Calendar Spine
+        #    Trace back phien giao dich cuoi cung cua nam 2020 (2020-12-31) tu EIA API v2:
+        #      - RBRTE (Brent): 51.22 $/BBL
+        #      - EER_EPD2DXL0_PF4_RGC_DPG (ULSD Diesel): 1.432 $/GAL
+        #    De Causal Forward-Fill cho 3 ngay nghi dau nam 2021 (01/01 - 03/01/2021)
+        #    truoc phien giao dich dau tien cua nam 2021 (2021-01-04).
         # -------------------------------------------------------------------
-        logger.info("Dang xu ly [3/4] Phuong an 2A: EIA Energy Daily Causal Forward-Fill (LOCF)...")
+        logger.info("Dang xu ly [3/4] Phuong an 2A: EIA Energy Daily Causal Forward-Fill (LOCF + 2020-12-31 Traceback)...")
         con.execute("""
             CREATE OR REPLACE TABLE silver.int_energy_prices_daily_filled AS
-            WITH spine AS (
+            WITH min_max_dates AS (
+                SELECT
+                    MIN(observation_date) AS min_obs_date,
+                    MAX(observation_date) AS max_obs_date
+                FROM silver.stg_imf_chokepoint_daily
+            ),
+            spine AS (
                 SELECT CAST(d AS DATE) AS calendar_date
                 FROM generate_series(
-                    (SELECT MIN(observation_date) FROM silver.stg_imf_chokepoint_daily),
-                    (SELECT MAX(observation_date) FROM silver.stg_imf_chokepoint_daily),
+                    DATE '2020-12-31',
+                    (SELECT max_obs_date FROM min_max_dates),
                     INTERVAL 1 DAY
                 ) AS t(d)
             ),
@@ -177,6 +188,25 @@ def build_processed_layer() -> None:
                     series_description,
                     units
                 FROM silver.stg_eia_energy_prices
+            ),
+            eia_with_traceback AS (
+                SELECT
+                    period_date,
+                    series,
+                    price_value
+                FROM silver.stg_eia_energy_prices
+                UNION ALL
+                SELECT DATE '2020-12-31' AS period_date, 'RBRTE' AS series, 51.22 AS price_value
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM silver.stg_eia_energy_prices
+                    WHERE series = 'RBRTE' AND period_date = DATE '2020-12-31'
+                )
+                UNION ALL
+                SELECT DATE '2020-12-31' AS period_date, 'EER_EPD2DXL0_PF4_RGC_DPG' AS series, 1.432 AS price_value
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM silver.stg_eia_energy_prices
+                    WHERE series = 'EER_EPD2DXL0_PF4_RGC_DPG' AND period_date = DATE '2020-12-31'
+                )
             ),
             grid AS (
                 SELECT s.calendar_date, d.*
@@ -198,7 +228,7 @@ def build_processed_layer() -> None:
                     p.price_value                                                   AS price_value_observed,
                     CASE WHEN p.price_value IS NOT NULL THEN g.calendar_date END    AS trading_date
                 FROM grid g
-                LEFT JOIN silver.stg_eia_energy_prices p
+                LEFT JOIN eia_with_traceback p
                     ON p.series = g.series
                     AND p.period_date = g.calendar_date
             ),
@@ -231,6 +261,7 @@ def build_processed_layer() -> None:
                 (price_value_observed IS NULL AND price_value IS NOT NULL)          AS is_forward_filled,
                 DATE_DIFF('day', last_trading_date, calendar_date)                  AS days_since_last_trade
             FROM filled
+            WHERE calendar_date >= (SELECT min_obs_date FROM min_max_dates)
             ORDER BY series, calendar_date;
         """)
         con.execute(f"""
