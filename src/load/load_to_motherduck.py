@@ -50,6 +50,7 @@ TABLES = {
     ("gold", "fct_chokepoint_transit_daily"): DATA_GOLD_DIR / "fct_chokepoint_transit_daily.parquet",
     ("gold", "mart_chokepoint_energy_regime_daily"): DATA_GOLD_DIR / "mart_chokepoint_energy_regime_daily.parquet",
     ("gold", "mart_red_sea_cape_rerouting_daily"): DATA_GOLD_DIR / "mart_red_sea_cape_rerouting_daily.parquet",
+    ("gold", "mart_outlier_consensus_labeled_daily"): DATA_GOLD_DIR / "mart_outlier_consensus_labeled_daily.parquet",
 }
 
 # Goi Free cho 10 GB storage. Chan o 1 GB de khong bao gio cham nguong tinh phi.
