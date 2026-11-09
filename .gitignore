@@ -15,3 +15,7 @@ data/raw/*.csv
 dbt_maritime/target/
 dbt_maritime/dbt_packages/
 dbt_maritime/logs/
+
+
+# Notes
+note/

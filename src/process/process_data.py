@@ -61,6 +61,10 @@ def build_processed_layer() -> None:
     con = duckdb.connect(str(DUCKDB_PATH))
     try:
         con.execute("CREATE SCHEMA IF NOT EXISTS silver;")
+        con.execute("DROP TABLE IF EXISTS silver.int_maritime_energy_daily_joined;")
+        con.execute("DROP TABLE IF EXISTS silver.int_energy_prices_daily_filled;")
+        con.execute("DROP TABLE IF EXISTS silver.stg_imf_chokepoint_daily;")
+        con.execute("DROP TABLE IF EXISTS silver.stg_eia_energy_prices;")
 
         # -------------------------------------------------------------------
         # 1. Phuong an 1A: Staging EIA Energy Prices (Fill area_name tu duoarea)
