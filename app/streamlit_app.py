@@ -240,19 +240,33 @@ def render_kpi_card(
     spark_vals: list[float],
     status: str = "neutral",
 ) -> None:
-    """Hiển thị thẻ KPI chuẩn: Số lớn + Chênh lệch so với mức nền + Sparkline nhỏ."""
+    """Hiển thị thẻ KPI chuẩn: Số lớn + Chênh lệch so với mức nền + Sparkline nhỏ (đổi màu khi vượt ngưỡng)."""
     border_map = {
         "critical": COLOR_RED,
         "warning": COLOR_AMBER,
         "good": COLOR_GREEN,
         "neutral": COLOR_SLATE,
     }
+    bg_map = {
+        "critical": "#FFFBFB",
+        "warning": "#FFFDF7",
+        "good": "#F8FEF9",
+        "neutral": "#FFFFFF",
+    }
+    val_color_map = {
+        "critical": COLOR_RED,
+        "warning": "#B54708",
+        "good": COLOR_GREEN,
+        "neutral": "#101828",
+    }
     top_color = border_map.get(status, COLOR_SLATE)
+    card_bg = bg_map.get(status, "#FFFFFF")
+    val_color = val_color_map.get(status, "#101828")
     svg = make_sparkline_svg(spark_vals, stroke_color=top_color)
     html = f"""
-    <div class="kpi-card" style="border-top-color: {top_color};">
+    <div class="kpi-card" style="border-top-color: {top_color}; background: {card_bg};">
         <div class="kpi-title">{title}</div>
-        <div class="kpi-value">{big_value}</div>
+        <div class="kpi-value" style="color: {val_color};">{big_value}</div>
         <div class="kpi-delta">{delta_text}</div>
         <div style="margin-top:2px;">{svg}</div>
     </div>
@@ -346,14 +360,32 @@ if page.startswith("Trang 1"):
     base_ulsd = float(pre_en["ulsd_usd_per_gal"].mean())
     base_crack = float(pre_en["diesel_brent_crack_bbl"].mean())
 
-    # Số liệu trong cửa sổ đang chọn & ngày mới nhất
+    # Số liệu trong cửa sổ đang chọn & ngày mới nhất (lấy trực tiếp từ pct_vs_baseline_total trong bi_mart)
     suez_win_avg = float(df_rr_win["suez_n_total"].mean())
     bab_win_avg = float(df_rr_win["babelmandeb_n_total"].mean())
     cape_win_avg = float(df_rr_win["cape_n_total"].mean())
 
-    suez_pct_vs_base = (suez_win_avg - base_suez) * 100.0 / base_suez
-    bab_pct_vs_base = (bab_win_avg - base_bab) * 100.0 / base_bab
+    suez_pct_vs_base = float(
+        df_tr_win.loc[df_tr_win["portname"] == "Suez Canal", "pct_vs_baseline_total"].mean()
+    )
+    bab_pct_vs_base = float(
+        df_tr_win.loc[df_tr_win["portname"] == "Bab el-Mandeb Strait", "pct_vs_baseline_total"].mean()
+    )
+    cape_pct_vs_base = float(
+        df_tr_win.loc[df_tr_win["portname"] == "Cape of Good Hope", "pct_vs_baseline_total"].mean()
+    )
     red_sea_combined_pct = ((suez_win_avg + bab_win_avg) - (base_suez + base_bab)) * 100.0 / (base_suez + base_bab)
+
+    # Đỉnh sụt giảm / tăng trưởng MA30 trong kỳ để hiển thị mức cực đại bên cạnh trung bình kỳ
+    suez_peak30_pct = float(
+        ((df_rr_win["suez_n_total"].rolling(30, min_periods=7).mean() - base_suez) * 100.0 / base_suez).min()
+    )
+    bab_peak30_pct = float(
+        ((df_rr_win["babelmandeb_n_total"].rolling(30, min_periods=7).mean() - base_bab) * 100.0 / base_bab).min()
+    )
+    cape_peak30_pct = float(
+        ((df_rr_win["cape_n_total"].rolling(30, min_periods=7).mean() - base_cape) * 100.0 / base_cape).max()
+    )
 
     cape_share_win = float(df_rr_win["cape_rerouting_share_total_pct"].mean())
     cape_share_delta = cape_share_win - base_cape_share
@@ -366,7 +398,7 @@ if page.startswith("Trang 1"):
     latest_crack = float(latest_en["diesel_brent_crack_bbl"])
     crack_delta_vs_base = latest_crack - base_crack
 
-    # Điểm nghẽn đang cảnh báo High/Critical tại ngày mới nhất (dùng MA7 để tránh nhiễu 1 ngày)
+    # Điểm nghẽn đang cảnh báo High/Critical tại ngày mới nhất từ cột daily_alert_severity
     latest_tr = fact_transit[fact_transit["observation_date"] == max_obs_ts].copy()
     alert_ports = latest_tr[latest_tr["daily_alert_severity"].isin(["High", "Critical"])].sort_values(
         "pct_vs_baseline_total"
@@ -394,9 +426,11 @@ if page.startswith("Trang 1"):
         banner_border = COLOR_GREEN
         severity_tag = "BÌNH THƯỜNG"
 
+    suez_dir_txt = f"thấp hơn <b>{abs(suez_pct_vs_base):.1f}%</b>" if suez_pct_vs_base < 0 else f"cao hơn <b>{suez_pct_vs_base:.1f}%</b>"
+    bab_dir_txt = f"thấp hơn <b>{abs(bab_pct_vs_base):.1f}%</b>" if bab_pct_vs_base < 0 else f"cao hơn <b>{bab_pct_vs_base:.1f}%</b>"
     auto_conclusion = (
         f"<b>[{severity_tag} · {window_desc}]</b> "
-        f"Lưu lượng Suez <b>{suez_pct_vs_base:+.1f}%</b> & Bab el-Mandeb <b>{bab_pct_vs_base:+.1f}%</b> so với mức nền; "
+        f"Lưu lượng Suez {suez_dir_txt} (Bab el-Mandeb {bab_dir_txt}) so với mức nền; "
         f"<b>{cape_share_win:.1f}%</b> tàu Á–Âu đi vòng Mũi Hảo Vọng; "
         f"Brent <b>${latest_brent:.2f}/bbl</b> ({brent_30d_pct:+.1f}% trong 30 ngày)."
     )
@@ -442,7 +476,7 @@ if page.startswith("Trang 1"):
         render_kpi_card(
             title="[B1] Lưu lượng Suez & Bab vs Nền",
             big_value=f"{red_sea_combined_pct:+.1f}%",
-            delta_text=f"Suez {suez_pct_vs_base:+.1f}% · Bab {bab_pct_vs_base:+.1f}% (vs nền 21–22)",
+            delta_text=f"Suez {suez_pct_vs_base:+.1f}% · Bab {bab_pct_vs_base:+.1f}% (pct_vs_baseline)",
             spark_vals=sp_b1,
             status=b1_status,
         )
@@ -450,7 +484,7 @@ if page.startswith("Trang 1"):
     with b_cols[1]:
         b2_status = "critical" if cape_share_win >= 65 else ("warning" if cape_share_win >= 50 else "good")
         render_kpi_card(
-            title="[B2] Tỷ trọng đi vòng Cape (%)",
+            title="[B2] Đi vòng Mũi Hảo Vọng (%)",
             big_value=f"{cape_share_win:.1f}%",
             delta_text=f"{cape_share_delta:+.1f} điểm % vs nền ({base_cape_share:.1f}%)",
             spark_vals=sp_b2,
@@ -462,7 +496,7 @@ if page.startswith("Trang 1"):
         render_kpi_card(
             title="[B3] Giá dầu Brent ($/bbl)",
             big_value=f"${latest_brent:.2f}",
-            delta_text=f"30d: {brent_30d_pct:+.1f}% · Biến động 30d: {latest_vol_30d:.2f}%",
+            delta_text=f"30d: {brent_30d_pct:+.1f}% · Vol 30d: {latest_vol_30d:.2f}% (Nền ${base_brent:.0f})",
             spark_vals=sp_b3,
             status=b3_status,
         )
@@ -478,9 +512,9 @@ if page.startswith("Trang 1"):
         )
 
     with b_cols[4]:
-        b5_status = "critical" if n_alert_ports >= 6 else ("warning" if n_alert_ports >= 3 else "good")
+        b5_status = "critical" if n_alert_ports >= 5 else ("warning" if n_alert_ports >= 3 else "good")
         render_kpi_card(
-            title="[B5] Điểm nghẽn cảnh báo High/Critical",
+            title="[B5] Điểm nghẽn đang cảnh báo",
             big_value=f"{n_alert_ports} / 28",
             delta_text=f"Top 3: {top3_str}",
             spark_vals=daily_alerts_ts,
@@ -505,12 +539,12 @@ if page.startswith("Trang 1"):
             vertical_spacing=0.08,
             row_heights=[0.54, 0.46],
             subplot_titles=(
-                "[C1] Lưu lượng Suez, Bab el-Mandeb & Mũi Hảo Vọng (% lệch MA7 so với mức nền 2021–2022)",
-                "[C2] Đồng biến động Giá dầu Brent & ULSD Diesel quy đổi ($/bbl, vùng bóng = sự kiện)",
+                "[C1] Lưu lượng Suez, Bab el-Mandeb & Mũi Hảo Vọng (% lệch MA7 so với mức nền)",
+                "[C2] Đồng biến động Giá dầu Brent & Diesel proxy ($/bbl, vùng bóng = sự kiện)",
             ),
         )
 
-        # Panel trên: % lệch so với nền của Suez, Bab el-Mandeb, Cape of Good Hope
+        # Panel trên: % lệch so với nền của Suez (Vàng), Bab el-Mandeb (Đỏ), Cape of Good Hope (Xanh)
         fig_c.add_trace(
             go.Scatter(
                 x=df_plot["observation_date"],
@@ -543,13 +577,13 @@ if page.startswith("Trang 1"):
         )
         fig_c.add_hline(y=0, line_dash="dot", line_color="#98A2B3", row=1, col=1)
 
-        # Panel dưới: Giá dầu Brent & Diesel quy đổi ($/bbl)
+        # Panel dưới: Giá dầu Brent & Diesel quy đổi ($/bbl) — dùng tông trung tính để màu sắc trên Trang 1 chỉ báo trạng thái
         fig_c.add_trace(
             go.Scatter(
                 x=df_plot["observation_date"],
                 y=df_plot["brent_usd_per_bbl"],
                 name="Brent ($/bbl)",
-                line=dict(color=COLOR_NAVY, width=1.9),
+                line=dict(color="#1D2939", width=1.9),
             ),
             row=2,
             col=1,
@@ -558,17 +592,17 @@ if page.startswith("Trang 1"):
             go.Scatter(
                 x=df_plot["observation_date"],
                 y=df_plot["ulsd_usd_per_bbl"],
-                name="ULSD Diesel proxy ($/bbl = $/gal × 42)",
-                line=dict(color=COLOR_BLUE, width=1.7, dash="dot"),
+                name="Diesel ULSD proxy ($/bbl = $/gal × 42)",
+                line=dict(color="#667085", width=1.7, dash="dot"),
             ),
             row=2,
             col=1,
         )
 
-        # Vùng bóng sự kiện địa chính trị (Shaded Event Bands)
+        # Vùng bóng sự kiện địa chính trị (Shaded Event Bands — chỉ dùng vàng/đỏ báo trạng thái)
         event_colors = {
-            "EVT_01": "rgba(247, 144, 9, 0.18)",
-            "EVT_02": "rgba(21, 112, 239, 0.10)",
+            "EVT_01": "rgba(247, 144, 9, 0.16)",
+            "EVT_02": "rgba(247, 144, 9, 0.12)",
             "EVT_03": "rgba(217, 45, 32, 0.09)",
             "EVT_04": "rgba(217, 45, 32, 0.18)",
         }
@@ -599,17 +633,16 @@ if page.startswith("Trang 1"):
         fig_c.update_annotations(font_size=11.5)
         fig_c.update_yaxes(title_text="% vs nền", gridcolor="#F2F4F7", row=1, col=1, title_font=dict(size=10))
         fig_c.update_yaxes(title_text="USD / bbl", gridcolor="#F2F4F7", row=2, col=1, title_font=dict(size=10))
-        st.plotly_chart(fig_c, use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(fig_c, width="stretch", config={"displayModeBar": False})
 
     with cd_cols[1]:
-        # Tính chỉ số Thiệt hại | Lợi ích từ dữ liệu thực đo trong cửa sổ chọn so với mức nền 2021–2022
+        # Tính chỉ số Thiệt hại | Lợi ích từ dữ liệu thực đo trong cửa sổ chọn so với mức nền
         brent_win_avg = float(df_en_win["brent_usd_per_bbl"].mean())
+        brent_win_max = float(df_en_win["brent_usd_per_bbl"].max())
         ulsd_win_avg = float(df_en_win["ulsd_usd_per_gal"].mean())
         crack_win_avg = float(df_en_win["diesel_brent_crack_bbl"].mean())
 
-        brent_pct_vs_base = (brent_win_avg - base_brent) * 100.0 / base_brent
-        ulsd_pct_vs_base = (ulsd_win_avg - base_ulsd) * 100.0 / base_ulsd
-        cape_pct_vs_base = (cape_win_avg - base_cape) * 100.0 / base_cape
+        brent_max_pct_vs_base = (brent_win_max - base_brent) * 100.0 / base_brent
         cape_tnk_win = float(df_rr_win["cape_rerouting_share_tanker_pct"].mean())
         cape_cnt_win = float(df_rr_win["cape_rerouting_share_container_pct"].mean())
 
@@ -622,19 +655,17 @@ if page.startswith("Trang 1"):
                     <div class="impact-item">
                         <b style="color:{COLOR_RED};">↓ {bab_pct_vs_base:+.1f}%</b><br/>
                         Lưu lượng <b>Bab el-Mandeb</b><br/>
-                        <span style="color:#667085; font-size:0.76rem;">{base_bab:.1f} → {bab_win_avg:.1f} tàu/ngày</span>
+                        <span style="color:#667085; font-size:0.75rem;">Đỉnh 30d: {bab_peak30_pct:+.1f}% ({base_bab:.0f}→{bab_win_avg:.0f} tàu)</span>
                     </div>
                     <div class="impact-item">
                         <b style="color:{COLOR_RED};">↓ {suez_pct_vs_base:+.1f}%</b><br/>
                         Lưu lượng <b>Kênh đào Suez</b><br/>
-                        <span style="color:#667085; font-size:0.76rem;">{base_suez:.1f} → {suez_win_avg:.1f} tàu/ngày</span>
+                        <span style="color:#667085; font-size:0.75rem;">Đỉnh 30d: {suez_peak30_pct:+.1f}% ({base_suez:.0f}→{suez_win_avg:.0f} tàu)</span>
                     </div>
                     <div class="impact-item">
-                        <b style="color:{COLOR_AMBER if brent_pct_vs_base >= 0 else COLOR_SLATE};">
-                            {'↑' if brent_pct_vs_base >= 0 else '↓'} Brent {brent_pct_vs_base:+.1f}% · ULSD {ulsd_pct_vs_base:+.1f}%
-                        </b><br/>
-                        Giá nhiên liệu giao ngay vs nền<br/>
-                        <span style="color:#667085; font-size:0.76rem;">TB kỳ: ${brent_win_avg:.1f}/bbl · ${ulsd_win_avg:.2f}/gal</span>
+                        <b style="color:{COLOR_AMBER};">↑ Đỉnh Brent ${brent_win_max:.1f}/bbl ({brent_max_pct_vs_base:+.1f}%)</b><br/>
+                        Cú sốc giá nhiên liệu so với nền<br/>
+                        <span style="color:#667085; font-size:0.75rem;">TB kỳ: ${brent_win_avg:.1f}/bbl · Diesel ${ulsd_win_avg:.2f}/gal</span>
                     </div>
                 </div>
                 """,
@@ -645,21 +676,21 @@ if page.startswith("Trang 1"):
             st.markdown(
                 f"""
                 <div class="impact-box" style="border-top: 3px solid {COLOR_GREEN};">
-                    <div class="impact-header" style="color:{COLOR_GREEN};">[D2] DỊCH CHUYỂN & LỢI ÍCH</div>
+                    <div class="impact-header" style="color:{COLOR_GREEN};">[D2] LỢI ÍCH (ĐO ĐƯỢC)</div>
                     <div class="impact-item">
                         <b style="color:{COLOR_GREEN};">↑ {cape_pct_vs_base:+.1f}%</b><br/>
                         Lưu lượng <b>Mũi Hảo Vọng</b><br/>
-                        <span style="color:#667085; font-size:0.76rem;">{base_cape:.1f} → {cape_win_avg:.1f} tàu/ngày</span>
+                        <span style="color:#667085; font-size:0.75rem;">Đỉnh 30d: {cape_peak30_pct:+.1f}% ({base_cape:.0f}→{cape_win_avg:.0f} tàu)</span>
                     </div>
                     <div class="impact-item">
                         <b style="color:{COLOR_GREEN};">↑ {cape_share_win:.1f}% ({cape_share_delta:+.1f} đ%)</b><br/>
                         Tỷ trọng hấp thụ tuyến Cape<br/>
-                        <span style="color:#667085; font-size:0.76rem;">Container: {cape_cnt_win:.1f}% · Tanker: {cape_tnk_win:.1f}%</span>
+                        <span style="color:#667085; font-size:0.75rem;">Container: {cape_cnt_win:.1f}% · Tanker: {cape_tnk_win:.1f}%</span>
                     </div>
                     <div class="impact-item">
-                        <b style="color:{COLOR_BLUE};">↗ Crack ${crack_win_avg:.1f}/bbl</b><br/>
-                        Biên lọc dầu (Lợi ích tiềm năng)<br/>
-                        <span style="color:#667085; font-size:0.75rem;"><i>Suy luận từ proxy giá, không đo lợi nhuận</i></span>
+                        <b style="color:#344054;">↗ Crack ${crack_win_avg:.1f}/bbl</b><br/>
+                        Biên lọc dầu mở rộng<br/>
+                        <span style="color:#667085; font-size:0.74rem;"><i>Bên hưởng lợi tiềm năng (suy luận), không đo lợi nhuận</i></span>
                     </div>
                 </div>
                 """,
@@ -830,7 +861,7 @@ else:
             yaxis=dict(autorange="reversed", tickfont=dict(size=10)),
             xaxis=dict(tickfont=dict(size=10)),
         )
-        st.plotly_chart(fig_hm, use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(fig_hm, width="stretch", config={"displayModeBar": False})
 
     with row1_c2:
         st.markdown("##### 2. Thay thế tuyến: Suez / Bab el-Mandeb vs. Mũi Hảo Vọng (Tách Tàu dầu & Tàu Container)")
@@ -931,7 +962,7 @@ else:
         fig_sub.update_annotations(font_size=11)
         fig_sub.update_yaxes(title_text="Tàu/ngày", secondary_y=False, gridcolor="#F2F4F7")
         fig_sub.update_yaxes(title_text="Cape %", range=[0, 100], secondary_y=True, showgrid=False)
-        st.plotly_chart(fig_sub, use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(fig_sub, width="stretch", config={"displayModeBar": False})
 
     st.divider()
 
@@ -1026,7 +1057,7 @@ else:
             paper_bgcolor="white",
             plot_bgcolor="white",
         )
-        st.plotly_chart(fig_ev, use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(fig_ev, width="stretch", config={"displayModeBar": False})
 
     with row2_c2:
         st.markdown(f"##### 4. Quan hệ Giá & Lưu lượng tại `{sel_port}` (Tính trên chuỗi sai phân dừng $I(0)$)")
@@ -1122,7 +1153,7 @@ else:
         fig_corr.update_annotations(font_size=10.5)
         fig_corr.update_yaxes(range=[-0.8, 0.8], gridcolor="#F2F4F7", row=1, col=1)
         fig_corr.update_yaxes(range=[-0.5, 0.5], gridcolor="#F2F4F7", row=1, col=2)
-        st.plotly_chart(fig_corr, use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(fig_corr, width="stretch", config={"displayModeBar": False})
 
     st.divider()
 
@@ -1168,7 +1199,7 @@ else:
                 .agg(so_ngay_cang=("observation_date", "count"), so_cang=("portname", "nunique"))
                 .sort_values("so_ngay_cang", ascending=False)
             )
-            st.dataframe(lbl_counts, use_container_width=True, hide_index=True, height=210)
+            st.dataframe(lbl_counts, width="stretch", hide_index=True, height=210)
 
         with c_f2:
             avail_codes = sorted(df_real["chokepoint_label_code"].unique().tolist())
@@ -1192,7 +1223,7 @@ else:
                 "struct_mod_z_base",
                 "brent_usd_per_bbl",
             ]
-            st.dataframe(df_real_filtered[show_cols].head(250), use_container_width=True, hide_index=True, height=210)
+            st.dataframe(df_real_filtered[show_cols].head(250), width="stretch", hide_index=True, height=210)
 
     with tab_sensor:
         df_sensor = df_out_win[df_out_win["chokepoint_label_code"] == "L10"].sort_values(
@@ -1212,7 +1243,7 @@ else:
             "is_flatline_telemetry_anomaly",
             "chokepoint_domain_label",
         ]
-        st.dataframe(df_sensor[sensor_cols], use_container_width=True, hide_index=True, height=220)
+        st.dataframe(df_sensor[sensor_cols], width="stretch", hide_index=True, height=220)
 
     # -----------------------------------------------------------------------
     # KHỐI 6: MỤC MỞ RỘNG "DỮ LIỆU VÀ PHƯƠNG PHÁP" (ĐỘ TƯƠI, FORWARD-FILL, GIỚI HẠN)
@@ -1249,18 +1280,31 @@ else:
         with m_c2:
             st.markdown("**Minh họa các ngày điền khuyết (`is_forward_filled = TRUE`) tạo lợi suất bằng 0 trong 90 ngày gần nhất:**")
             df_ff_plot = fact_energy.tail(90).copy()
+            df_ff_plot["brent_ret_1d_calc"] = df_ff_plot["brent_usd_per_bbl"].pct_change().fillna(0.0) * 100.0
             obs_pts = df_ff_plot[~df_ff_plot["brent_is_ffill"]]
             ff_pts = df_ff_plot[df_ff_plot["brent_is_ffill"]]
 
-            fig_ff = go.Figure()
+            fig_ff = make_subplots(
+                rows=2,
+                cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.10,
+                row_heights=[0.55, 0.45],
+                subplot_titles=(
+                    "Mức giá Brent ($/bbl) — Đánh dấu ngày điền khuyết LOCF (Thứ Bảy, Chủ Nhật, Ngày lễ)",
+                    "Lợi suất 1 ngày ΔP (%) — Ngày điền khuyết tạo ra các ngày lợi suất = 0%",
+                ),
+            )
             fig_ff.add_trace(
                 go.Scatter(
                     x=df_ff_plot["calendar_date"],
                     y=df_ff_plot["brent_usd_per_bbl"],
                     mode="lines",
-                    name="Đường giá Brent liên tục (Calendar Spine)",
-                    line=dict(color="#98A2B3", width=1.5),
-                )
+                    name="Đường giá liên tục (Calendar Spine)",
+                    line=dict(color="#98A2B3", width=1.4),
+                ),
+                row=1,
+                col=1,
             )
             fig_ff.add_trace(
                 go.Scatter(
@@ -1268,24 +1312,55 @@ else:
                     y=obs_pts["brent_usd_per_bbl"],
                     mode="markers",
                     name="Phiên giao dịch thực (is_ffill = False)",
-                    marker=dict(color=COLOR_NAVY, size=6),
-                )
+                    marker=dict(color=COLOR_NAVY, size=5.5),
+                ),
+                row=1,
+                col=1,
             )
             fig_ff.add_trace(
                 go.Scatter(
                     x=ff_pts["calendar_date"],
                     y=ff_pts["brent_usd_per_bbl"],
                     mode="markers",
-                    name="Ngày điền khuyết LOCF (is_ffill = True, ΔP = 0)",
-                    marker=dict(color=COLOR_AMBER, size=7, symbol="diamond"),
-                )
+                    name="Ngày điền khuyết (is_ffill = True, ΔP = 0)",
+                    marker=dict(color=COLOR_AMBER, size=6.5, symbol="diamond"),
+                ),
+                row=1,
+                col=1,
             )
+
+            # Panel 2: Lợi suất 1 ngày (%)
+            fig_ff.add_trace(
+                go.Bar(
+                    x=obs_pts["calendar_date"],
+                    y=obs_pts["brent_ret_1d_calc"],
+                    name="Lợi suất phiên thực (ΔP ≠ 0)",
+                    marker_color=COLOR_NAVY,
+                ),
+                row=2,
+                col=1,
+            )
+            fig_ff.add_trace(
+                go.Scatter(
+                    x=ff_pts["calendar_date"],
+                    y=ff_pts["brent_ret_1d_calc"],
+                    mode="markers",
+                    name="Lợi suất = 0% do điền khuyết",
+                    marker=dict(color=COLOR_AMBER, size=6.5, symbol="diamond"),
+                ),
+                row=2,
+                col=1,
+            )
+            fig_ff.add_hline(y=0, line_dash="dot", line_color="#98A2B3", row=2, col=1)
+
             fig_ff.update_layout(
-                height=260,
-                margin=dict(l=6, r=6, t=10, b=6),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=9.5)),
-                yaxis_title="Brent ($/bbl)",
+                height=310,
+                margin=dict(l=6, r=6, t=24, b=6),
+                legend=dict(orientation="h", yanchor="bottom", y=1.06, xanchor="right", x=1, font=dict(size=9)),
                 paper_bgcolor="white",
                 plot_bgcolor="white",
             )
-            st.plotly_chart(fig_ff, use_container_width=True, config={"displayModeBar": False})
+            fig_ff.update_annotations(font_size=10.5)
+            fig_ff.update_yaxes(title_text="$/bbl", row=1, col=1, title_font=dict(size=9.5))
+            fig_ff.update_yaxes(title_text="ΔP (%)", row=2, col=1, title_font=dict(size=9.5))
+            st.plotly_chart(fig_ff, width="stretch", config={"displayModeBar": False})
