@@ -36,9 +36,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_GOLD_DIR = PROJECT_ROOT / "data" / "gold"
 DUCKDB_PATH = PROJECT_ROOT / "data" / "maritime_dwh.duckdb"
 EVENTS_SEED_CSV = PROJECT_ROOT / "dbt_maritime" / "seeds" / "geopolitical_events.csv"
+REROUTING_MAP_CSV = PROJECT_ROOT / "dbt_maritime" / "seeds" / "chokepoint_rerouting_map.csv"
+COORDS_SEED_CSV = PROJECT_ROOT / "dbt_maritime" / "seeds" / "chokepoint_coordinates.csv"
+
+MIN_BASELINE_VESSELS_PER_DAY = 10.0
+BASELINE_DEFINITION_VI = "Trung bình ngày giai đoạn chuẩn 2 năm: 01/01/2021 – 31/12/2022 (730 ngày)"
 
 OUT_DIM_CHOKEPOINTS = DATA_GOLD_DIR / "dim_chokepoints.parquet"
 OUT_DIM_EVENTS = DATA_GOLD_DIR / "dim_geopolitical_events.parquet"
+OUT_DIM_REROUTING_MAP = DATA_GOLD_DIR / "dim_chokepoint_rerouting_map.parquet"
 OUT_FCT_ENERGY = DATA_GOLD_DIR / "fct_energy_prices_daily.parquet"
 OUT_FCT_TRANSIT = DATA_GOLD_DIR / "fct_chokepoint_transit_daily.parquet"
 OUT_MART_REGIME = DATA_GOLD_DIR / "mart_chokepoint_energy_regime_daily.parquet"
@@ -52,6 +58,8 @@ def build_gold_layer() -> None:
         )
     if not EVENTS_SEED_CSV.exists():
         raise FileNotFoundError(f"Khong tim thay file seed su kien: {EVENTS_SEED_CSV}")
+    if not REROUTING_MAP_CSV.exists():
+        raise FileNotFoundError(f"Khong tim thay file seed anh xa tuyen thay the: {REROUTING_MAP_CSV}")
 
     DATA_GOLD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -66,63 +74,83 @@ def build_gold_layer() -> None:
         con.execute("DROP TABLE IF EXISTS bi_mart.fact_chokepoint_energy_regime_daily;")
         con.execute("DROP TABLE IF EXISTS bi_mart.fact_chokepoint_transit_daily;")
         con.execute("DROP TABLE IF EXISTS bi_mart.fact_energy_prices_daily;")
+        con.execute("DROP TABLE IF EXISTS bi_mart.dim_chokepoint_rerouting_map;")
         con.execute("DROP TABLE IF EXISTS bi_mart.dim_geopolitical_events;")
         con.execute("DROP TABLE IF EXISTS bi_mart.dim_chokepoints;")
 
         # -------------------------------------------------------------------
         # 1. Bảng chiều Điểm nghẽn Hàng hải: bi_mart.dim_chokepoints (28 dòng)
         # -------------------------------------------------------------------
-        logger.info("Dang xay dung [1/6] bi_mart.dim_chokepoints...")
-        con.execute("""
+        logger.info("Dang xay dung [1/7] bi_mart.dim_chokepoints...")
+        con.execute(f"""
             CREATE OR REPLACE TABLE bi_mart.dim_chokepoints AS
             WITH agg AS (
                 SELECT
                     portid,
                     portname,
                     ROUND(AVG(n_total) FILTER (WHERE year IN (2021, 2022)), 2)          AS baseline_n_total,
+                    ROUND(STDDEV_SAMP(n_total) FILTER (WHERE year IN (2021, 2022)), 2)  AS baseline_sd_n_total,
                     ROUND(AVG(n_tanker) FILTER (WHERE year IN (2021, 2022)), 2)         AS baseline_n_tanker,
+                    ROUND(STDDEV_SAMP(n_tanker) FILTER (WHERE year IN (2021, 2022)), 2) AS baseline_sd_n_tanker,
+                    ROUND(AVG(n_container) FILTER (WHERE year IN (2021, 2022)), 2)      AS baseline_n_container,
+                    ROUND(STDDEV_SAMP(n_container) FILTER (WHERE year IN (2021, 2022)), 2) AS baseline_sd_n_container,
                     ROUND(AVG(capacity_tanker) FILTER (WHERE year IN (2021, 2022)), 0)  AS baseline_capacity_tanker,
                     ROUND(SUM(n_tanker) * 100.0 / NULLIF(SUM(n_total), 0), 2)           AS avg_tanker_share_pct
                 FROM silver.stg_imf_chokepoint_daily
                 GROUP BY portid, portname
+            ),
+            coords AS (
+                SELECT portid, latitude, longitude
+                FROM read_csv_auto('{COORDS_SEED_CSV.as_posix()}', header=True)
             )
             SELECT
-                portid,
-                portname,
+                a.portid,
+                a.portname,
+                c.latitude,
+                c.longitude,
                 CASE
-                    WHEN portname IN ('Suez Canal', 'Bab el-Mandeb Strait', 'Strait of Hormuz')
+                    WHEN a.portname IN ('Suez Canal', 'Bab el-Mandeb Strait', 'Strait of Hormuz')
                         THEN 'Middle East & Red Sea'
-                    WHEN portname IN ('Bosporus Strait', 'Gibraltar Strait', 'Kerch Strait')
+                    WHEN a.portname IN ('Bosporus Strait', 'Gibraltar Strait', 'Kerch Strait')
                         THEN 'Mediterranean & Black Sea'
-                    WHEN portname IN ('Dover Strait', 'Oresund Strait')
+                    WHEN a.portname IN ('Dover Strait', 'Oresund Strait')
                         THEN 'Europe & Baltic'
-                    WHEN portname IN ('Cape of Good Hope')
+                    WHEN a.portname IN ('Cape of Good Hope')
                         THEN 'Southern Africa'
-                    WHEN portname IN ('Panama Canal', 'Magellan Strait', 'Yucatan Channel', 'Windward Passage', 'Mona Passage')
+                    WHEN a.portname IN ('Panama Canal', 'Magellan Strait', 'Yucatan Channel', 'Windward Passage', 'Mona Passage')
                         THEN 'Americas & Caribbean'
                     ELSE 'Asia-Pacific'
                 END AS maritime_region,
                 CASE
-                    WHEN portname IN ('Strait of Hormuz', 'Bosporus Strait', 'Oresund Strait', 'Kerch Strait')
+                    WHEN a.portname IN ('Strait of Hormuz', 'Bosporus Strait', 'Oresund Strait', 'Kerch Strait')
                         THEN 'Origin Energy Export Hub'
-                    WHEN portname IN ('Suez Canal', 'Bab el-Mandeb Strait', 'Malacca Strait', 'Panama Canal',
-                                      'Gibraltar Strait', 'Dover Strait', 'Taiwan Strait', 'Korea Strait')
+                    WHEN a.portname IN ('Suez Canal', 'Bab el-Mandeb Strait', 'Malacca Strait', 'Panama Canal',
+                                        'Gibraltar Strait', 'Dover Strait', 'Taiwan Strait', 'Korea Strait')
                         THEN 'Global Transit Corridor'
-                    WHEN portname IN ('Cape of Good Hope', 'Lombok Strait', 'Sunda Strait', 'Magellan Strait')
+                    WHEN a.portname IN ('Cape of Good Hope', 'Lombok Strait', 'Sunda Strait', 'Magellan Strait')
                         THEN 'Rerouting Alternative'
                     ELSE 'Regional Maritime Passage'
                 END AS chokepoint_role,
-                (baseline_n_tanker >= 10.0 OR portname IN (
+                (a.baseline_n_tanker >= 10.0 OR a.portname IN (
                     'Strait of Hormuz', 'Malacca Strait', 'Suez Canal', 'Bab el-Mandeb Strait',
                     'Dover Strait', 'Gibraltar Strait', 'Panama Canal', 'Cape of Good Hope',
                     'Bosporus Strait', 'Oresund Strait'
                 )) AS is_primary_oil_route,
-                baseline_n_total,
-                baseline_n_tanker,
-                baseline_capacity_tanker,
-                avg_tanker_share_pct
-            FROM agg
-            ORDER BY CAST(REPLACE(portid, 'chokepoint', '') AS INTEGER);
+                a.baseline_n_total,
+                a.baseline_sd_n_total,
+                a.baseline_n_tanker,
+                a.baseline_sd_n_tanker,
+                a.baseline_n_container,
+                a.baseline_sd_n_container,
+                a.baseline_capacity_tanker,
+                a.avg_tanker_share_pct,
+                {MIN_BASELINE_VESSELS_PER_DAY}::DOUBLE AS min_baseline_threshold,
+                (a.baseline_n_total >= {MIN_BASELINE_VESSELS_PER_DAY}) AS is_above_min_baseline,
+                '{BASELINE_DEFINITION_VI}'::VARCHAR AS baseline_definition
+            FROM agg a
+            LEFT JOIN coords c
+                ON a.portid = c.portid
+            ORDER BY CAST(REPLACE(a.portid, 'chokepoint', '') AS INTEGER);
         """)
         con.execute(f"""
             COPY bi_mart.dim_chokepoints
@@ -130,9 +158,9 @@ def build_gold_layer() -> None:
         """)
 
         # -------------------------------------------------------------------
-        # 2. Bảng chiều Sự kiện Địa chính trị & Khí hậu: bi_mart.dim_geopolitical_events (4 dòng)
+        # 2. Bảng chiều Sự kiện Địa chính trị & Khí hậu: bi_mart.dim_geopolitical_events
         # -------------------------------------------------------------------
-        logger.info("Dang xay dung [2/6] bi_mart.dim_geopolitical_events...")
+        logger.info("Dang xay dung [2/7] bi_mart.dim_geopolitical_events...")
         con.execute(f"""
             CREATE OR REPLACE TABLE bi_mart.dim_geopolitical_events AS
             WITH raw_seed AS (
@@ -144,6 +172,8 @@ def build_gold_layer() -> None:
             SELECT
                 CAST(s.event_id AS VARCHAR)                             AS event_id,
                 CAST(s.event_name AS VARCHAR)                           AS event_name,
+                CAST(s.event_name_vi AS VARCHAR)                        AS event_name_vi,
+                CAST(s.event_short_label_vi AS VARCHAR)                 AS event_short_label_vi,
                 CAST(s.start_date AS DATE)                              AS start_date,
                 LEAST(CAST(s.end_date AS DATE), m.max_date)             AS end_date,
                 DATE_DIFF('day', CAST(s.start_date AS DATE), LEAST(CAST(s.end_date AS DATE), m.max_date)) + 1
@@ -162,6 +192,27 @@ def build_gold_layer() -> None:
         con.execute(f"""
             COPY bi_mart.dim_geopolitical_events
             TO '{OUT_DIM_EVENTS.as_posix()}' (FORMAT PARQUET, COMPRESSION SNAPPY);
+        """)
+
+        # -------------------------------------------------------------------
+        # 2b. Bảng ánh xạ điểm nghẽn -> tuyến thay thế: bi_mart.dim_chokepoint_rerouting_map
+        # -------------------------------------------------------------------
+        logger.info("Dang xay dung [3/7] bi_mart.dim_chokepoint_rerouting_map...")
+        con.execute(f"""
+            CREATE OR REPLACE TABLE bi_mart.dim_chokepoint_rerouting_map AS
+            SELECT
+                CAST(primary_portid AS VARCHAR)      AS primary_portid,
+                CAST(primary_portname AS VARCHAR)    AS primary_portname,
+                CAST(alt_portid AS VARCHAR)          AS alt_portid,
+                CAST(alt_portname AS VARCHAR)        AS alt_portname,
+                CAST(corridor_name_vi AS VARCHAR)    AS corridor_name_vi,
+                CAST(rerouting_note_vi AS VARCHAR)   AS rerouting_note_vi
+            FROM read_csv_auto('{REROUTING_MAP_CSV.as_posix()}', header=True)
+            ORDER BY primary_portid;
+        """)
+        con.execute(f"""
+            COPY bi_mart.dim_chokepoint_rerouting_map
+            TO '{OUT_DIM_REROUTING_MAP.as_posix()}' (FORMAT PARQUET, COMPRESSION SNAPPY);
         """)
 
         # -------------------------------------------------------------------
@@ -528,6 +579,7 @@ def build_gold_layer() -> None:
         outputs = [
             ("bi_mart.dim_chokepoints", OUT_DIM_CHOKEPOINTS),
             ("bi_mart.dim_geopolitical_events", OUT_DIM_EVENTS),
+            ("bi_mart.dim_chokepoint_rerouting_map", OUT_DIM_REROUTING_MAP),
             ("bi_mart.fact_energy_prices_daily", OUT_FCT_ENERGY),
             ("bi_mart.fact_chokepoint_transit_daily", OUT_FCT_TRANSIT),
             ("bi_mart.fact_chokepoint_energy_regime_daily", OUT_MART_REGIME),

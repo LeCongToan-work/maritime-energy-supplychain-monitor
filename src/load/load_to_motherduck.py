@@ -118,6 +118,16 @@ TABLE_SPECS: list[tuple[str, str, Path, list[str], list[tuple[list[str], str, st
     ),
     (
         "bi_mart",
+        "dim_chokepoint_rerouting_map",
+        DATA_GOLD_DIR / "dim_chokepoint_rerouting_map.parquet",
+        ["primary_portid"],
+        [
+            (["primary_portid"], "bi_mart", "dim_chokepoints", ["portid"]),
+            (["alt_portid"], "bi_mart", "dim_chokepoints", ["portid"]),
+        ],
+    ),
+    (
+        "bi_mart",
         "fact_energy_prices_daily",
         DATA_GOLD_DIR / "fct_energy_prices_daily.parquet",
         ["calendar_date"],

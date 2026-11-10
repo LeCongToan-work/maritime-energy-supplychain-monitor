@@ -1,0 +1,9 @@
+primary_portid,primary_portname,alt_portid,alt_portname,corridor_name_vi,rerouting_note_vi
+chokepoint1,Suez Canal,chokepoint7,Cape of Good Hope,Á–Âu (Biển Đỏ ↔ Mũi Hảo Vọng),Tàu rời tuyến kênh đào Suez đi vòng qua Mũi Hảo Vọng ở cực Nam châu Phi
+chokepoint4,Bab el-Mandeb Strait,chokepoint7,Cape of Good Hope,Á–Âu (Biển Đỏ ↔ Mũi Hảo Vọng),Tàu tránh eo biển Bab el-Mandeb chuyển hướng vòng qua Mũi Hảo Vọng
+chokepoint7,Cape of Good Hope,chokepoint4,Bab el-Mandeb Strait,Á–Âu (Mũi Hảo Vọng ↔ Biển Đỏ),Đối chiếu lượng tàu hấp thụ tại Mũi Hảo Vọng với tuyến chính Bab el-Mandeb
+chokepoint2,Panama Canal,chokepoint21,Magellan Strait,Châu Mỹ (Panama ↔ Magellan),Tàu chuyển hướng vòng cực Nam Nam Mỹ qua eo biển Magellan khi kênh Panama hạn chế lượt qua
+chokepoint21,Magellan Strait,chokepoint2,Panama Canal,Châu Mỹ (Magellan ↔ Panama),Đối chiếu eo biển Magellan với tuyến chính kênh đào Panama
+chokepoint5,Malacca Strait,chokepoint15,Lombok Strait,Đông Nam Á (Malacca ↔ Lombok),Tuyến thay thế sâu hơn qua eo biển Lombok khi hạn chế tải trọng hoặc tắc nghẽn tại Malacca
+chokepoint15,Lombok Strait,chokepoint5,Malacca Strait,Đông Nam Á (Lombok ↔ Malacca),Đối chiếu eo biển Lombok với tuyến chính eo biển Malacca
+chokepoint19,Sunda Strait,chokepoint15,Lombok Strait,Đông Nam Á (Sunda ↔ Lombok),Tuyến thay thế lân cận giữa biển Java và Ấn Độ Dương qua eo biển Lombok
