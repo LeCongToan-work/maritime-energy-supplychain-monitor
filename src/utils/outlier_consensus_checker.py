@@ -112,7 +112,7 @@ def build_and_evaluate_outlier_mart() -> None:
     con = duckdb.connect(str(DUCKDB_PATH))
 
     try:
-        con.execute("CREATE SCHEMA IF NOT EXISTS gold;")
+        con.execute("CREATE SCHEMA IF NOT EXISTS bi_mart;")
 
         # ===================================================================
         # 1. KIEM TRA QUY TAC VAT LY & BAO TOAN KY THUAT (LOP 1 - HARD RULES)
@@ -143,7 +143,7 @@ def build_and_evaluate_outlier_mart() -> None:
                 COUNT(*) FILTER (WHERE brent_usd_per_bbl <= 0 OR ulsd_usd_per_gal <= 0) AS non_positive_prices,
                 COUNT(*) FILTER (WHERE brent_usd_per_bbl IS NULL OR ulsd_usd_per_gal IS NULL) AS null_prices,
                 COUNT(*) FILTER (WHERE ABS(brent_log_ret_1d) > 50.0 OR ABS(ulsd_log_ret_1d) > 50.0) AS extreme_50pct_jumps
-            FROM gold.fct_energy_prices_daily
+            FROM bi_mart.fact_energy_prices_daily
         """).fetchone()
 
         print(f"  1. IMF Chokepoints ({hard_checks[0]:,} dong):")
@@ -178,7 +178,7 @@ def build_and_evaluate_outlier_mart() -> None:
                       * 100.0 / NULLIF(LAG(brent_usd_per_bbl, 30) OVER (ORDER BY calendar_date), 0), 2) AS brent_change_30d_pct,
                 brent_is_ffill,
                 ulsd_is_ffill
-            FROM gold.fct_energy_prices_daily
+            FROM bi_mart.fact_energy_prices_daily
             ORDER BY calendar_date
         """).fetchdf()
 
@@ -314,8 +314,8 @@ def build_and_evaluate_outlier_mart() -> None:
                 t.n_tanker_zscore_90d,
                 t.active_event_id,
                 t.regime_type
-            FROM gold.fct_chokepoint_transit_daily t
-            JOIN gold.dim_chokepoints d USING (portid)
+            FROM bi_mart.fact_chokepoint_transit_daily t
+            JOIN bi_mart.dim_chokepoints d USING (portid)
             ORDER BY t.portid, t.observation_date
         """).fetchdf()
 
@@ -578,15 +578,19 @@ def build_and_evaluate_outlier_mart() -> None:
         drop_cols = ["lag14_struct_mod_z", "next_day_n_total", "next2_day_n_total"]
         df_mart = df_all.drop(columns=drop_cols).sort_values(["portid", "observation_date"]).reset_index(drop=True)
 
-        # Luu thanh bang BI Mart trong DuckDB schema `gold` va xuat Parquet
+        # Luu thanh bang BI Mart trong DuckDB schema `bi_mart` va xuat Parquet (ep kieu observation_date ve DATE)
         con.register("df_mart_view", df_mart)
+        con.execute("DROP TABLE IF EXISTS bi_mart.fact_outlier_consensus_labeled_daily;")
         con.execute("""
-            CREATE OR REPLACE TABLE gold.mart_outlier_consensus_labeled_daily AS
-            SELECT * FROM df_mart_view
+            CREATE OR REPLACE TABLE bi_mart.fact_outlier_consensus_labeled_daily AS
+            SELECT
+                CAST(observation_date AS DATE) AS observation_date,
+                * EXCLUDE (observation_date)
+            FROM df_mart_view
             ORDER BY portid, observation_date;
         """)
         con.execute(f"""
-            COPY gold.mart_outlier_consensus_labeled_daily
+            COPY bi_mart.fact_outlier_consensus_labeled_daily
             TO '{OUT_MART_OUTLIER_PARQUET.as_posix()}' (FORMAT PARQUET, COMPRESSION SNAPPY);
         """)
 
