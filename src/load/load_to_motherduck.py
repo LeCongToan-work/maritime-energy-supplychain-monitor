@@ -20,6 +20,7 @@ Chay:
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
 import sys
@@ -180,20 +181,184 @@ TABLE_SPECS: list[tuple[str, str, Path, list[str], list[tuple[list[str], str, st
 ]
 
 MAX_UPLOAD_BYTES = 1 * 1024**3
+MOTHERDUCK_FREE_LIMIT_GB = 10.0
+DEFAULT_STOP_THRESHOLD_GB = 9.0
+DEFAULT_WARN_THRESHOLD_GB = 7.5
+LIMIT_REACHED_EXIT_CODE = 42
+
+QUOTA_ERROR_KEYWORDS = (
+    "storage limit",
+    "quota",
+    "free tier",
+    "lite plan",
+    "plan limit",
+    "limit exceeded",
+    "compute limit",
+    "compute hours",
+    "pulse",
+    "payment required",
+    "insufficient",
+    "exceeded maximum",
+)
 
 
-def check_local_files() -> None:
+class MotherDuckLimitReachedError(RuntimeError):
+    """Bao hieu tai khoan MotherDuck da cham nguong gioi han goi mien phi."""
+
+
+def _get_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(f"Gia tri {name}={raw!r} khong hop le, dung mac dinh {default}")
+        return default
+
+
+def _write_quota_report(report: dict) -> None:
+    report_path = os.getenv("QUOTA_REPORT_PATH")
+    if not report_path:
+        return
+    path = Path(report_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info(f"Da ghi bao cao dung luong MotherDuck tai: {path}")
+
+
+def _is_quota_exception(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(keyword in msg for keyword in QUOTA_ERROR_KEYWORDS)
+
+
+def check_local_files() -> int:
     missing = [str(spec[2]) for spec in TABLE_SPECS if not spec[2].exists()]
     if missing:
         raise FileNotFoundError(f"Thieu file Parquet, hay chay pipeline truoc: {missing}")
 
     total = sum(spec[2].stat().st_size for spec in TABLE_SPECS)
-    logger.info(f"Tong dung luong Parquet local (13 bang): {total / 1024 ** 2:.2f} MB")
+    logger.info(f"Tong dung luong Parquet local ({len(TABLE_SPECS)} bang): {total / 1024 ** 2:.2f} MB")
     if total > MAX_UPLOAD_BYTES:
-        raise RuntimeError(
-            f"Du lieu {total / 1024 ** 3:.2f} GB vuot nguong an toan {MAX_UPLOAD_BYTES / 1024 ** 3:.0f} GB "
-            "cua goi Free. Dung lai de tranh phat sinh phi."
+        raise MotherDuckLimitReachedError(
+            f"Du lieu upload {total / 1024 ** 3:.2f} GB vuot nguong an toan moi lan day "
+            f"{MAX_UPLOAD_BYTES / 1024 ** 3:.2f} GB."
         )
+    return total
+
+
+def query_motherduck_storage_usage(con: duckdb.DuckDBPyConnection) -> dict:
+    """
+    Truy van tong dung luong dang su dung tren MotherDuck (tinh ca active, historical,
+    retained_for_clone va failsafe bytes) tu MD_INFORMATION_SCHEMA.STORAGE_INFO.
+    """
+    report = {
+        "source": "unknown",
+        "free_limit_gb": MOTHERDUCK_FREE_LIMIT_GB,
+        "stop_threshold_gb": _get_float_env("MOTHERDUCK_STOP_THRESHOLD_GB", DEFAULT_STOP_THRESHOLD_GB),
+        "warn_threshold_gb": _get_float_env("MOTHERDUCK_WARN_THRESHOLD_GB", DEFAULT_WARN_THRESHOLD_GB),
+        "active_bytes": 0,
+        "historical_bytes": 0,
+        "retained_for_clone_bytes": 0,
+        "failsafe_bytes": 0,
+        "total_bytes": 0,
+        "total_gb": 0.0,
+        "databases": [],
+    }
+
+    try:
+        rows = con.execute("""
+            SELECT
+                database_name,
+                COALESCE(active_bytes, 0) AS active_bytes,
+                COALESCE(historical_bytes, 0) AS historical_bytes,
+                COALESCE(retained_for_clone_bytes, 0) AS retained_for_clone_bytes,
+                COALESCE(failsafe_bytes, 0) AS failsafe_bytes
+            FROM MD_INFORMATION_SCHEMA.STORAGE_INFO
+        """).fetchall()
+        report["source"] = "MD_INFORMATION_SCHEMA.STORAGE_INFO"
+        for db_name, active_b, hist_b, clone_b, fail_b in rows:
+            db_total = int(active_b + hist_b + clone_b + fail_b)
+            report["active_bytes"] += int(active_b)
+            report["historical_bytes"] += int(hist_b)
+            report["retained_for_clone_bytes"] += int(clone_b)
+            report["failsafe_bytes"] += int(fail_b)
+            report["databases"].append(
+                {
+                    "database_name": db_name,
+                    "total_gb": round(db_total / 1024**3, 4),
+                    "active_gb": round(active_b / 1024**3, 4),
+                    "historical_gb": round(hist_b / 1024**3, 4),
+                    "failsafe_gb": round(fail_b / 1024**3, 4),
+                }
+            )
+    except Exception as exc:
+        logger.warning(
+            f"Khong truy van duoc MD_INFORMATION_SCHEMA.STORAGE_INFO ({exc}). "
+            "Thu fallback bang PRAGMA database_size."
+        )
+        try:
+            row = con.execute("SELECT database_size FROM pragma_database_size() LIMIT 1").fetchone()
+            report["source"] = "pragma_database_size"
+            if row and row[0]:
+                logger.info(f"MotherDuck database_size (pragma): {row[0]}")
+        except Exception:
+            pass
+
+    report["total_bytes"] = (
+        report["active_bytes"]
+        + report["historical_bytes"]
+        + report["retained_for_clone_bytes"]
+        + report["failsafe_bytes"]
+    )
+    report["total_gb"] = round(report["total_bytes"] / 1024**3, 4)
+    return report
+
+
+def enforce_motherduck_quota(
+    con: duckdb.DuckDBPyConnection,
+    incoming_bytes: int,
+    stage: str,
+) -> dict:
+    """
+    Kiem tra dung luong MotherDuck truoc/sau khi nap du lieu.
+    Neu cham nguong dung an toan (mac dinh 9.0 GB / 10.0 GB goi Free), ghi bao cao va
+    nem MotherDuckLimitReachedError de CI/CD thong bao va tu dong dung.
+    """
+    report = query_motherduck_storage_usage(con)
+    report["stage"] = stage
+    report["incoming_mb"] = round(incoming_bytes / 1024**2, 2)
+    projected_bytes = report["total_bytes"] + (incoming_bytes if stage == "pre_upload" else 0)
+    projected_gb = round(projected_bytes / 1024**3, 4)
+    report["projected_gb"] = projected_gb
+
+    stop_limit_gb = report["stop_threshold_gb"]
+    warn_limit_gb = report["warn_threshold_gb"]
+
+    if report["source"] == "MD_INFORMATION_SCHEMA.STORAGE_INFO":
+        logger.info(
+            f"Dung luong MotherDuck [{stage}]: {report['total_gb']:.4f} GB "
+            f"(du kien: {projected_gb:.4f} GB / nguong dung: {stop_limit_gb:.2f} GB | "
+            f"goi Free: {MOTHERDUCK_FREE_LIMIT_GB:.0f} GB)"
+        )
+        if projected_gb >= stop_limit_gb:
+            report["limit_reached"] = True
+            report["reason"] = (
+                f"Dung luong MotherDuck ({projected_gb:.4f} GB) da cham nguong an toan "
+                f"{stop_limit_gb:.2f} GB / {MOTHERDUCK_FREE_LIMIT_GB:.0f} GB cua goi mien phi."
+            )
+            _write_quota_report(report)
+            raise MotherDuckLimitReachedError(report["reason"])
+
+        if projected_gb >= warn_limit_gb:
+            logger.warning(
+                f"CANH BAO SOM: Dung luong MotherDuck ({projected_gb:.4f} GB) da vuot "
+                f"{warn_limit_gb:.2f} GB (sap cham gioi han {MOTHERDUCK_FREE_LIMIT_GB:.0f} GB)."
+            )
+
+    report["limit_reached"] = False
+    _write_quota_report(report)
+    return report
 
 
 def build_create_table_ddl(
@@ -322,7 +487,7 @@ def connect_motherduck() -> duckdb.DuckDBPyConnection:
 
 
 def run_load_motherduck(local_only: bool = False) -> None:
-    check_local_files()
+    local_bytes = check_local_files()
 
     # Cap nhat Local DuckDB truoc
     logger.info(f"=== [BUOC 1] CAP NHAT RANG BUOC PK/FK TREN LOCAL DUCKDB ({LOCAL_DUCKDB_PATH.name}) ===")
@@ -335,19 +500,42 @@ def run_load_motherduck(local_only: bool = False) -> None:
     if local_only:
         return
 
-    # Cap nhat MotherDuck Cloud
+    # Cap nhat MotherDuck Cloud (kem kiem tra gioi han goi mien phi)
     logger.info(f"=== [BUOC 2] DONG BO BANG & RANG BUOC PK/FK LEN MOTHERDUCK CLOUD ({DATABASE_NAME}) ===")
-    md_con = connect_motherduck()
+    md_con: duckdb.DuckDBPyConnection | None = None
     try:
+        md_con = connect_motherduck()
+        enforce_motherduck_quota(md_con, incoming_bytes=local_bytes, stage="pre_upload")
         sync_tables_with_constraints(md_con, db_prefix=DATABASE_NAME)
+        enforce_motherduck_quota(md_con, incoming_bytes=local_bytes, stage="post_upload")
+    except MotherDuckLimitReachedError:
+        raise
+    except Exception as exc:
+        if _is_quota_exception(exc):
+            reason = f"MotherDuck tra ve loi gioi han goi mien phi (storage/compute): {exc}"
+            _write_quota_report(
+                {
+                    "limit_reached": True,
+                    "stage": "motherduck_api_error",
+                    "free_limit_gb": MOTHERDUCK_FREE_LIMIT_GB,
+                    "incoming_mb": round(local_bytes / 1024**2, 2),
+                    "reason": reason,
+                }
+            )
+            raise MotherDuckLimitReachedError(reason) from exc
+        raise
     finally:
-        md_con.close()
+        if md_con is not None:
+            md_con.close()
 
 
 if __name__ == "__main__":
     try:
         is_local_only = "--local" in sys.argv
         run_load_motherduck(local_only=is_local_only)
+    except MotherDuckLimitReachedError as exc:
+        logger.critical(f"[MOTHERDUCK_LIMIT_REACHED] {exc}")
+        sys.exit(LIMIT_REACHED_EXIT_CODE)
     except Exception as exc:
         logger.error(str(exc))
         sys.exit(1)

@@ -3,13 +3,14 @@ streamlit_app.py
 ----------------
 Maritime & Energy Supply Chain Monitor — Streamlit Dashboard (2 Pages)
   - Trang 1: Báo cáo Tổng quan cho Ban điều hành
-  - Trang 2: Phân tích Chuỗi Điểm nghẽn, Bản đồ Lưu lượng & Đồng biến động Giá Năng lượng
+  - Trang 2: Phân tích Điểm nghẽn, Bản đồ Hành lang Đổi tuyến & Đồng biến động Giá Năng lượng (I(1) & I(0))
   - Thanh điều hướng Sidebar bên trái (mặc định thu gọn, bấm '>' để mở)
   - Cả 2 trang dùng chung Bộ lọc Lịch quét khoảng thời gian & Bộ lọc chọn điểm nghẽn
   - Biểu đồ tự động co giãn kích thước theo số lượng đại lượng được chọn
   - Tương thích cả Chế độ Sáng (Light Mode) & Chế độ Tối (Dark Mode)
 
-Nguồn dữ liệu: DuckDB schema `bi_mart` (`data/maritime_dwh.duckdb`) / Parquet `data/gold/*.parquet`.
+Nguồn dữ liệu: MotherDuck (`md:maritime_dwh`, schema `bi_mart`) khi có `MOTHERDUCK_TOKEN`,
+tự động fallback về DuckDB local (`data/maritime_dwh.duckdb`) hoặc Parquet (`data/gold/*.parquet`).
 Chạy ứng dụng:
   venv\\Scripts\\streamlit.exe run app/streamlit_app.py
 """
@@ -17,7 +18,9 @@ Chạy ứng dụng:
 from __future__ import annotations
 
 from datetime import date
+import logging
 import math
+import os
 from pathlib import Path
 
 import duckdb
@@ -31,7 +34,7 @@ import streamlit as st
 # Cấu hình trang & CSS thích ứng cả Light Mode & Dark Mode (Sidebar trái, thu gọn mặc định)
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Giám sát Điểm nghẽn Hàng hải & Giá Năng lượng",
+    page_title="Oil monitor",
     page_icon="🚢",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -66,25 +69,42 @@ GRID_COLOR = "rgba(128, 128, 128, 0.22)"
 TRACE_PALETTE = [
     "#F04438",
     "#F79009",
-    "#2E90FA",
-    "#12B76A",
     "#A78BFA",
-    "#14B8A6",
+    "#12B76A",
     "#F472B6",
     "#38BDF8",
     "#FB923C",
     "#4ADE80",
 ]
 
+ROLE_VI_MAP = {
+    "Origin Energy Export Hub": "Yết hầu xuất khẩu năng lượng (Không có tuyến biển thay thế)",
+    "Global Transit Corridor": "Hành lang quá cảnh liên lục địa (Có tuyến đi vòng thay thế)",
+    "Rerouting Alternative": "Tuyến đường vòng thay thế hấp thụ lưu lượng",
+    "Regional Maritime Passage": "Eo biển hàng hải nội vùng",
+}
+
+ROLE_SHORT_VI = {
+    "Origin Energy Export Hub": "Yết hầu xuất khẩu",
+    "Global Transit Corridor": "Hành lang quá cảnh",
+    "Rerouting Alternative": "Tuyến thay thế",
+    "Regional Maritime Passage": "Eo biển khu vực",
+}
+
 st.markdown(
     """
     <style>
     .block-container {
-        padding-top: 0.65rem !important;
-        padding-bottom: 0.55rem !important;
+        padding-top: 2.8rem !important;
+        padding-bottom: 0.65rem !important;
         padding-left: 1.25rem !important;
         padding-right: 1.25rem !important;
         max-width: 100% !important;
+    }
+    header[data-testid="stHeader"] {
+        background: transparent !important;
+        height: 2.5rem !important;
+        z-index: 10 !important;
     }
     div[data-testid="stVerticalBlock"] > div {
         gap: 0.35rem !important;
@@ -111,13 +131,6 @@ st.markdown(
         padding: 8px 11px 5px 11px;
         height: 100%;
     }
-    .kpi-head {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 4px;
-        margin-bottom: 2px;
-    }
     .kpi-title {
         font-size: 0.74rem;
         font-weight: 700;
@@ -128,26 +141,7 @@ st.markdown(
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
-    }
-    .badge-loss {
-        background: rgba(240, 68, 56, 0.16);
-        color: #F04438;
-        border: 1px solid rgba(240, 68, 56, 0.45);
-        border-radius: 999px;
-        padding: 1px 7px;
-        font-size: 0.67rem;
-        font-weight: 700;
-        white-space: nowrap;
-    }
-    .badge-gain {
-        background: rgba(18, 183, 106, 0.16);
-        color: #12B76A;
-        border: 1px solid rgba(18, 183, 106, 0.45);
-        border-radius: 999px;
-        padding: 1px 7px;
-        font-size: 0.67rem;
-        font-weight: 700;
-        white-space: nowrap;
+        margin-bottom: 2px;
     }
     .kpi-value {
         font-size: 1.40rem;
@@ -181,14 +175,16 @@ st.markdown(
         padding-bottom: 3px;
         border-bottom: 2px solid rgba(128, 128, 128, 0.28);
     }
-    .method-warn {
-        background: rgba(247, 144, 9, 0.14);
-        border-left: 4px solid #F79009;
+    .corridor-box {
+        background: var(--secondary-background-color);
+        border: 1px solid rgba(128, 128, 128, 0.25);
+        border-left: 4px solid #14B8A6;
+        border-radius: 5px;
         padding: 6px 10px;
-        border-radius: 4px;
-        font-size: 0.80rem;
+        font-size: 0.78rem;
         color: var(--text-color);
-        margin-bottom: 4px;
+        line-height: 1.4;
+        margin-top: 2px;
     }
     </style>
     """,
@@ -197,59 +193,118 @@ st.markdown(
 
 
 # ---------------------------------------------------------------------------
-# Tải dữ liệu từ kho `bi_mart`
+# Tải dữ liệu từ kho `bi_mart` (Ưu tiên MotherDuck Cloud -> DuckDB Local -> Parquet)
 # ---------------------------------------------------------------------------
-@st.cache_data(ttl=600)
+logger = logging.getLogger(__name__)
+MOTHERDUCK_DATABASE = os.getenv("MOTHERDUCK_DATABASE", "maritime_dwh")
+
+
+def _get_motherduck_token() -> str | None:
+    """Lấy MOTHERDUCK_TOKEN từ biến môi trường hoặc Streamlit Secrets (hỗ trợ .env cục bộ)."""
+    token = os.getenv("MOTHERDUCK_TOKEN") or os.getenv("motherduck_token")
+    if token:
+        return token.strip()
+
+    try:
+        secret_token = st.secrets.get("MOTHERDUCK_TOKEN") or st.secrets.get("motherduck_token")
+        if secret_token:
+            return str(secret_token).strip()
+    except Exception:
+        pass
+
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(PROJECT_ROOT / ".env")
+        token = os.getenv("MOTHERDUCK_TOKEN") or os.getenv("motherduck_token")
+        if token:
+            return token.strip()
+    except Exception:
+        pass
+
+    return None
+
+
+def _fetch_bi_mart_from_duckdb(con: duckdb.DuckDBPyConnection) -> dict[str, pd.DataFrame]:
+    """Truy vấn đầy đủ 8 bảng `bi_mart` dùng chung cho cả MotherDuck Cloud và DuckDB Local."""
+    return {
+        "dim_chokepoints": con.execute("SELECT * FROM bi_mart.dim_chokepoints").fetchdf(),
+        "dim_events": con.execute("SELECT * FROM bi_mart.dim_geopolitical_events ORDER BY start_date").fetchdf(),
+        "dim_rerouting_map": con.execute(
+            "SELECT * FROM bi_mart.dim_chokepoint_rerouting_map ORDER BY primary_portid"
+        ).fetchdf(),
+        "fact_energy": con.execute("SELECT * FROM bi_mart.fact_energy_prices_daily ORDER BY calendar_date").fetchdf(),
+        "fact_transit": con.execute(
+            "SELECT * FROM bi_mart.fact_chokepoint_transit_daily ORDER BY portid, observation_date"
+        ).fetchdf(),
+        "fact_regime": con.execute(
+            "SELECT * FROM bi_mart.fact_chokepoint_energy_regime_daily ORDER BY portid, observation_date"
+        ).fetchdf(),
+        "fact_rerouting": con.execute(
+            "SELECT * FROM bi_mart.fact_red_sea_cape_rerouting_daily ORDER BY observation_date"
+        ).fetchdf(),
+        "fact_outlier": con.execute(
+            "SELECT * FROM bi_mart.fact_outlier_consensus_labeled_daily ORDER BY portid, observation_date"
+        ).fetchdf(),
+    }
+
+
+@st.cache_data(ttl=1800)
 def load_bi_mart_data() -> dict[str, pd.DataFrame]:
-    if DUCKDB_PATH.exists():
+    dataset: dict[str, pd.DataFrame] | None = None
+    md_token = _get_motherduck_token()
+
+    # 1. Ưu tiên đọc từ MotherDuck Cloud
+    if md_token:
+        try:
+            os.environ["motherduck_token"] = md_token
+            con = duckdb.connect(f"md:{MOTHERDUCK_DATABASE}")
+            try:
+                dataset = _fetch_bi_mart_from_duckdb(con)
+            finally:
+                con.close()
+        except Exception as exc:
+            logger.warning(f"Không kết nối được MotherDuck ({exc}), thử fallback dữ liệu local.")
+
+    # 2. Fallback 1: DuckDB Local
+    if dataset is None and DUCKDB_PATH.exists():
         con = duckdb.connect(str(DUCKDB_PATH), read_only=True)
         try:
-            dim_chokepoints = con.execute("SELECT * FROM bi_mart.dim_chokepoints").fetchdf()
-            dim_events = con.execute("SELECT * FROM bi_mart.dim_geopolitical_events ORDER BY start_date").fetchdf()
-            fact_energy = con.execute("SELECT * FROM bi_mart.fact_energy_prices_daily ORDER BY calendar_date").fetchdf()
-            fact_transit = con.execute(
-                "SELECT * FROM bi_mart.fact_chokepoint_transit_daily ORDER BY portid, observation_date"
-            ).fetchdf()
-            fact_regime = con.execute(
-                "SELECT * FROM bi_mart.fact_chokepoint_energy_regime_daily ORDER BY portid, observation_date"
-            ).fetchdf()
-            fact_rerouting = con.execute(
-                "SELECT * FROM bi_mart.fact_red_sea_cape_rerouting_daily ORDER BY observation_date"
-            ).fetchdf()
-            fact_outlier = con.execute(
-                "SELECT * FROM bi_mart.fact_outlier_consensus_labeled_daily ORDER BY portid, observation_date"
-            ).fetchdf()
+            dataset = _fetch_bi_mart_from_duckdb(con)
         finally:
             con.close()
-    else:
-        dim_chokepoints = pd.read_parquet(GOLD_DIR / "dim_chokepoints.parquet")
-        dim_events = pd.read_parquet(GOLD_DIR / "dim_geopolitical_events.parquet")
-        fact_energy = pd.read_parquet(GOLD_DIR / "fct_energy_prices_daily.parquet")
-        fact_transit = pd.read_parquet(GOLD_DIR / "fct_chokepoint_transit_daily.parquet")
-        fact_regime = pd.read_parquet(GOLD_DIR / "mart_chokepoint_energy_regime_daily.parquet")
-        fact_rerouting = pd.read_parquet(GOLD_DIR / "mart_red_sea_cape_rerouting_daily.parquet")
-        fact_outlier = pd.read_parquet(GOLD_DIR / "mart_outlier_consensus_labeled_daily.parquet")
 
-    for df, col in [
-        (fact_energy, "calendar_date"),
-        (fact_transit, "observation_date"),
-        (fact_regime, "observation_date"),
-        (fact_rerouting, "observation_date"),
-        (fact_outlier, "observation_date"),
-        (dim_events, "start_date"),
-        (dim_events, "end_date"),
+    # 3. Fallback 2: Parquet Gold Local
+    if dataset is None:
+        required_parquets = {
+            "dim_chokepoints": GOLD_DIR / "dim_chokepoints.parquet",
+            "dim_events": GOLD_DIR / "dim_geopolitical_events.parquet",
+            "dim_rerouting_map": GOLD_DIR / "dim_chokepoint_rerouting_map.parquet",
+            "fact_energy": GOLD_DIR / "fct_energy_prices_daily.parquet",
+            "fact_transit": GOLD_DIR / "fct_chokepoint_transit_daily.parquet",
+            "fact_regime": GOLD_DIR / "mart_chokepoint_energy_regime_daily.parquet",
+            "fact_rerouting": GOLD_DIR / "mart_red_sea_cape_rerouting_daily.parquet",
+            "fact_outlier": GOLD_DIR / "mart_outlier_consensus_labeled_daily.parquet",
+        }
+        if not all(p.exists() for p in required_parquets.values()):
+            raise RuntimeError(
+                "Không thể tải dữ liệu từ MotherDuck và không tìm thấy kho dữ liệu local. "
+                "Vui lòng kiểm tra lại MOTHERDUCK_TOKEN trong Streamlit Secrets."
+            )
+        dataset = {key: pd.read_parquet(path) for key, path in required_parquets.items()}
+
+    for key, col in [
+        ("fact_energy", "calendar_date"),
+        ("fact_transit", "observation_date"),
+        ("fact_regime", "observation_date"),
+        ("fact_rerouting", "observation_date"),
+        ("fact_outlier", "observation_date"),
+        ("dim_events", "start_date"),
+        ("dim_events", "end_date"),
     ]:
-        df[col] = pd.to_datetime(df[col])
+        dataset[key][col] = pd.to_datetime(dataset[key][col])
 
-    return {
-        "dim_chokepoints": dim_chokepoints,
-        "dim_events": dim_events,
-        "fact_energy": fact_energy,
-        "fact_transit": fact_transit,
-        "fact_regime": fact_regime,
-        "fact_rerouting": fact_rerouting,
-        "fact_outlier": fact_outlier,
-    }
+    return dataset
 
 
 def make_sparkline_svg(values: list[float], stroke_color: str = "#98A2B3", width: int = 210, height: int = 26) -> str:
@@ -274,20 +329,14 @@ def make_sparkline_svg(values: list[float], stroke_color: str = "#98A2B3", width
     )
 
 
-def render_tagged_kpi_card(
+def render_kpi_card(
     title: str,
-    tag_type: str,
     big_value: str,
     delta_text: str,
     spark_vals: list[float],
     status: str = "neutral",
 ) -> None:
-    """Thẻ KPI tích hợp nhãn màu 'Thiệt hại' hoặc 'Lợi ích', thích ứng Sáng/Tối."""
-    badge_html = (
-        '<span class="badge-loss">● Thiệt hại</span>'
-        if tag_type == "loss"
-        else '<span class="badge-gain">● Lợi ích</span>'
-    )
+    """Thẻ KPI gọn: Tiêu đề, số lớn, chênh lệch vs nền & sparkline thích ứng Sáng/Tối."""
     border_map = {"critical": COLOR_RED, "warning": COLOR_AMBER, "good": COLOR_GREEN, "neutral": COLOR_PRIMARY}
     bg_map = {
         "critical": "rgba(240, 68, 56, 0.08)",
@@ -305,10 +354,7 @@ def render_tagged_kpi_card(
     st.markdown(
         f"""
         <div class="kpi-card" style="border-top-color: {top_color}; background: {card_bg};">
-            <div class="kpi-head">
-                <div class="kpi-title">{title}</div>
-                {badge_html}
-            </div>
+            <div class="kpi-title">{title}</div>
             <div class="kpi-value" style="color: {val_color};">{big_value}</div>
             <div class="kpi-delta">{delta_text}</div>
             <div style="margin-top:2px;">{svg}</div>
@@ -325,7 +371,8 @@ def render_shared_footer() -> None:
         <div class="footer-bar">
             <b>Định nghĩa nền (Baseline):</b> {BASELINE_DEF_TEXT}.
             &nbsp;·&nbsp; <b>Nguồn:</b> IMF PortWatch (28 điểm nghẽn hàng hải), U.S. EIA API v2 (Brent Europe FOB & Diesel ULSD USGC FOB).
-            &nbsp;·&nbsp; <b>Giới hạn:</b> Diesel ULSD là chỉ báo proxy (không phải giá bunker cảng); kho dữ liệu không có cước vận tải (Freight) & phụ phí BAF.
+            &nbsp;·&nbsp; <b>Phương pháp luận:</b> Kiểm định đồng thuận kép (Modified Z-Score MAD &gt; 3.5 ∧ Tukey IQR Fence); tương quan trượt 90 ngày tính trên chuỗi sai phân dừng I(0) (Δ7 ngày); loại trừ ngày nghỉ điền khuyết (LOCF) khi kiểm định cú sốc giá 1 ngày.
+            &nbsp;·&nbsp; <b>Giới hạn:</b> Diesel ULSD là chỉ báo proxy (không phải giá bunker cảng); kho dữ liệu không có cước vận tải (Freight) &amp; phụ phí BAF.
         </div>
         """,
         unsafe_allow_html=True,
@@ -337,33 +384,52 @@ def add_event_bands_with_names(
     dim_events: pd.DataFrame,
     win_min: pd.Timestamp,
     win_max: pd.Timestamp,
-    row: int | None = None,
-    col: int | None = None,
+    n_rows: int = 1,
 ) -> None:
-    """Đánh dấu vùng sự kiện trên biểu đồ bằng TÊN TIẾNG VIỆT NGẮN."""
+    """Đánh dấu vùng sự kiện bằng TÊN TIẾNG VIỆT NGẮN, tự giãn tầng dọc khi trùng mốc để không đè chữ."""
     ev_colors = {
         "EVT_01": "rgba(247, 144, 9, 0.16)",
         "EVT_02": "rgba(247, 144, 9, 0.12)",
         "EVT_03": "rgba(240, 68, 56, 0.08)",
         "EVT_04": "rgba(240, 68, 56, 0.17)",
     }
+    placed_anchors: list[tuple[pd.Timestamp, int]] = []
     for _, ev in dim_events.iterrows():
         ev_s = max(ev["start_date"], win_min)
         ev_e = min(ev["end_date"], win_max)
         if ev_e >= win_min and ev_s <= win_max:
-            kwargs = dict(
-                x0=ev_s,
-                x1=ev_e,
-                fillcolor=ev_colors.get(ev["event_id"], "rgba(150,150,150,0.12)"),
-                line_width=0,
-                annotation_text=ev["event_short_label_vi"],
-                annotation_position="top left",
-                annotation_font_size=10,
-            )
-            if row is not None and col is not None:
-                fig.add_vrect(**kwargs, row=row, col=col)
+            tier = 0
+            while any(abs((ev_s - px).days) < 260 and t == tier for px, t in placed_anchors):
+                tier += 1
+            placed_anchors.append((ev_s, tier))
+
+            fill_c = ev_colors.get(ev["event_id"], "rgba(150,150,150,0.12)")
+            if n_rows > 1:
+                for r in range(1, n_rows + 1):
+                    if r == 1:
+                        fig.add_vrect(
+                            x0=ev_s,
+                            x1=ev_e,
+                            fillcolor=fill_c,
+                            line_width=0,
+                            annotation_text=ev["event_short_label_vi"],
+                            annotation_position="top left",
+                            annotation=dict(font_size=10, yshift=-2 - tier * 16),
+                            row=r,
+                            col=1,
+                        )
+                    else:
+                        fig.add_vrect(x0=ev_s, x1=ev_e, fillcolor=fill_c, line_width=0, row=r, col=1)
             else:
-                fig.add_vrect(**kwargs)
+                fig.add_vrect(
+                    x0=ev_s,
+                    x1=ev_e,
+                    fillcolor=fill_c,
+                    line_width=0,
+                    annotation_text=ev["event_short_label_vi"],
+                    annotation_position="top left",
+                    annotation=dict(font_size=10, yshift=-2 - tier * 16),
+                )
 
 
 def parse_calendar_range(date_val, default_start: date, default_end: date) -> tuple[pd.Timestamp, pd.Timestamp]:
@@ -393,11 +459,15 @@ def calc_legend_top_margin(n_traces: int, base_top: int = 28) -> int:
 data = load_bi_mart_data()
 dim_chokepoints = data["dim_chokepoints"]
 dim_events = data["dim_events"]
+dim_rerouting_map = data["dim_rerouting_map"]
 fact_energy = data["fact_energy"]
 fact_transit = data["fact_transit"]
 fact_regime = data["fact_regime"]
 fact_rerouting = data["fact_rerouting"]
 fact_outlier = data["fact_outlier"]
+
+role_map = dim_chokepoints.set_index("portname")["chokepoint_role"].to_dict()
+tanker_share_map = dim_chokepoints.set_index("portname")["avg_tanker_share_pct"].to_dict()
 
 min_obs_ts = fact_transit["observation_date"].min()
 max_obs_ts = fact_transit["observation_date"].max()
@@ -423,6 +493,8 @@ default_focus_ports = ["Bab el-Mandeb Strait", "Suez Canal", "Strait of Hormuz"]
 # ---------------------------------------------------------------------------
 # SIDEBAR BÊN TRÁI (Mặc định thu gọn, bấm '>' để mở toàn bộ điều hướng & bộ lọc)
 # ---------------------------------------------------------------------------
+available_years = sorted(fact_transit["observation_date"].dt.year.unique().tolist())
+
 with st.sidebar:
     st.markdown("### 🧭 Điều hướng & Bộ lọc")
     page = st.radio(
@@ -436,16 +508,57 @@ with st.sidebar:
 
     st.divider()
 
-    cal_val = st.date_input(
-        "📅 Khoảng thời gian (Quét trên lịch)",
-        value=(date(2023, 11, 19), max_obs_date),
-        min_value=min_obs_date,
-        max_value=max_obs_date,
-        format="DD/MM/YYYY",
-        key="shared_calendar_range",
+    time_mode = st.radio(
+        "⏱️ Cách chọn thời gian",
+        options=["📅 Quét trên lịch", "🗓️ Chọn Năm & Tháng"],
+        horizontal=True,
+        key="shared_time_mode",
     )
-    win_start, win_end = parse_calendar_range(cal_val, date(2023, 11, 19), max_obs_date)
-    win_desc = f"{win_start.strftime('%d/%m/%Y')} – {win_end.strftime('%d/%m/%Y')}"
+
+    if time_mode == "🗓️ Chọn Năm & Tháng":
+        col_y, col_m = st.columns(2)
+        with col_y:
+            sel_year = st.selectbox(
+                "Năm",
+                options=["Tất cả"] + [str(y) for y in available_years],
+                index=len(available_years),  # Mặc định năm gần nhất
+                key="shared_sel_year",
+            )
+        with col_m:
+            month_opts = ["Tất cả"] + [f"Tháng {m:02d}" for m in range(1, 13)]
+            sel_month = st.selectbox(
+                "Tháng",
+                options=month_opts,
+                index=0,
+                key="shared_sel_month",
+            )
+
+        if sel_year == "Tất cả":
+            win_start = min_obs_ts
+            win_end = max_obs_ts
+        else:
+            yr = int(sel_year)
+            if sel_month == "Tất cả":
+                win_start = pd.Timestamp(f"{yr}-01-01")
+                win_end = min(pd.Timestamp(f"{yr}-12-31"), max_obs_ts)
+            else:
+                mo = int(sel_month.replace("Tháng ", ""))
+                start_dt = pd.Timestamp(year=yr, month=mo, day=1)
+                end_dt = (start_dt + pd.offsets.MonthEnd(1))
+                win_start = max(start_dt, min_obs_ts)
+                win_end = min(end_dt, max_obs_ts)
+        win_desc = f"{win_start.strftime('%d/%m/%Y')} – {win_end.strftime('%d/%m/%Y')}"
+    else:
+        cal_val = st.date_input(
+            "📅 Khoảng thời gian (Quét trên lịch)",
+            value=(date(2023, 11, 19), max_obs_date),
+            min_value=min_obs_date,
+            max_value=max_obs_date,
+            format="DD/MM/YYYY",
+            key="shared_calendar_range",
+        )
+        win_start, win_end = parse_calendar_range(cal_val, date(2023, 11, 19), max_obs_date)
+        win_desc = f"{win_start.strftime('%d/%m/%Y')} – {win_end.strftime('%d/%m/%Y')}"
 
     selected_ports = st.multiselect(
         "📍 Chọn điểm nghẽn theo dõi",
@@ -527,6 +640,7 @@ if page.startswith("Trang 1"):
     worst_sel_row = sel_stats.iloc[0]
     worst_port_name = str(worst_sel_row["portname"])
     worst_port_pct = float(worst_sel_row["pct_vs_base"])
+    worst_port_role_vi = ROLE_SHORT_VI.get(role_map.get(worst_port_name, ""), "")
 
     # Cảnh báo High/Critical toàn hệ thống (trong ngày cuối của khoảng lịch chọn)
     end_tr = fact_transit[fact_transit["observation_date"] == df_tr_win["observation_date"].max()].copy()
@@ -545,10 +659,10 @@ if page.startswith("Trang 1"):
     cape_win_avg = float(df_rr_win["cape_n_total"].mean())
     cape_pct_vs_base = float(df_tr_win.loc[df_tr_win["portname"] == "Cape of Good Hope", "pct_vs_baseline_total"].mean())
     cape_share_win = float(df_rr_win["cape_rerouting_share_total_pct"].mean())
-    cape_share_delta = cape_share_win - base_cape_share
 
     latest_en = df_en_win.iloc[-1] if not df_en_win.empty else fact_energy.iloc[-1]
     latest_brent = float(latest_en["brent_usd_per_bbl"])
+    latest_crack = float(latest_en["diesel_brent_crack_bbl"])
     brent_ref_ts = latest_en["calendar_date"] - pd.Timedelta(days=30)
     brent_30d_series = fact_energy.loc[fact_energy["calendar_date"] <= brent_ref_ts, "brent_usd_per_bbl"]
     brent_30d_ref = float(brent_30d_series.iloc[-1]) if not brent_30d_series.empty else base_brent
@@ -569,7 +683,7 @@ if page.startswith("Trang 1"):
         f"<b>{n_alert_ports}/28 điểm nghẽn</b> đang cảnh báo (nặng nhất toàn cầu: <b>{top3_alert_str}</b>); "
         f"Nhóm đang chọn ({len(selected_ports_p1)} điểm) lệch TB <b>{group_avg_pct:+.1f}%</b> vs nền; "
         f"<b>{cape_share_win:.1f}%</b> tàu Á–Âu đi vòng Mũi Hảo Vọng; "
-        f"Brent <b>${latest_brent:.2f}/bbl</b> ({brent_30d_pct:+.1f}% 30d)."
+        f"Brent <b>${latest_brent:.2f}/bbl</b> ({brent_30d_pct:+.1f}% 30d) · Crack <b>${latest_crack:.2f}/bbl</b>."
     )
 
     st.markdown(
@@ -585,7 +699,7 @@ if page.startswith("Trang 1"):
         unsafe_allow_html=True,
     )
 
-    # Thẻ KPI thích ứng theo đúng các điểm nghẽn đang chọn + Brent + Thẻ lợi ích duy nhất (Cape)
+    # Thẻ KPI thích ứng theo đúng các điểm nghẽn đang chọn (giữ nguyên cấu trúc ban đầu) + Brent + Mũi Hảo Vọng
     step_s = max(1, len(df_en_win) // 55)
     if len(selected_ports_p1) <= 2:
         kpi_cols = st.columns(len(selected_ports_p1) + 2)
@@ -594,42 +708,37 @@ if page.startswith("Trang 1"):
             p_pct = float(p_sub["pct_vs_baseline_total"].mean())
             p_avg = float(p_sub["n_total"].mean())
             p_base = float(base_map[pname])
+            p_role_short = ROLE_SHORT_VI.get(role_map.get(pname, ""), "")
             sp_vals = ((p_sub["n_total_ma7"] - p_base) * 100.0 / p_base).iloc[::step_s].tolist()
-            tag_t = "loss" if p_pct < 0 else "gain"
             st_lvl = "critical" if p_pct <= -30 else ("warning" if p_pct <= -10 else "good")
             with kpi_cols[idx]:
-                render_tagged_kpi_card(
+                render_kpi_card(
                     title=pname,
-                    tag_type=tag_t,
                     big_value=f"{p_pct:+.1f}%",
-                    delta_text=f"TB kỳ: {p_avg:.1f} tàu/ng vs nền {p_base:.1f}",
+                    delta_text=f"{p_role_short} · TB: {p_avg:.1f} vs nền {p_base:.1f} tàu/ngày",
                     spark_vals=sp_vals,
                     status=st_lvl,
                 )
         col_brent, col_cape = kpi_cols[-2], kpi_cols[-1]
     else:
         kpi_cols = st.columns(4)
-        # Card 1: Điểm giảm sâu nhất trong nhóm chọn
         p_worst_sub = df_sel_tr[df_sel_tr["portname"] == worst_port_name].sort_values("observation_date")
         p_worst_base = float(base_map[worst_port_name])
         sp_worst = ((p_worst_sub["n_total_ma7"] - p_worst_base) * 100.0 / p_worst_base).iloc[::step_s].tolist()
         with kpi_cols[0]:
-            render_tagged_kpi_card(
+            render_kpi_card(
                 title=f"Nặng nhất: {worst_port_name}",
-                tag_type="loss" if worst_port_pct < 0 else "gain",
                 big_value=f"{worst_port_pct:+.1f}%",
-                delta_text=f"TB kỳ: {float(worst_sel_row['avg_flow']):.1f} vs nền {p_worst_base:.1f} tàu/ng",
+                delta_text=f"{worst_port_role_vi} · TB: {float(worst_sel_row['avg_flow']):.1f} vs nền {p_worst_base:.1f} tàu/ngày",
                 spark_vals=sp_worst,
                 status="critical" if worst_port_pct <= -30 else ("warning" if worst_port_pct <= -10 else "good"),
             )
-        # Card 2: Trung bình nhóm chọn
         grp_ts = df_sel_tr.groupby("observation_date")["pct_vs_baseline_total"].mean().sort_index()
         with kpi_cols[1]:
-            render_tagged_kpi_card(
+            render_kpi_card(
                 title=f"TB nhóm chọn ({len(selected_ports_p1)} điểm)",
-                tag_type="loss" if group_avg_pct < 0 else "gain",
                 big_value=f"{group_avg_pct:+.1f}%",
-                delta_text="Chênh lệch lưu lượng TB so với nền",
+                delta_text="Chênh lệch lưu lượng TB so với nền 2021–2022",
                 spark_vals=grp_ts.iloc[::step_s].tolist(),
                 status="critical" if group_avg_pct <= -25 else ("warning" if group_avg_pct <= -10 else "good"),
             )
@@ -637,9 +746,8 @@ if page.startswith("Trang 1"):
 
     with col_brent:
         sp_brent = df_en_win["brent_ma7"].iloc[::step_s].tolist()
-        render_tagged_kpi_card(
+        render_kpi_card(
             title="Giá dầu Brent ($/bbl)",
-            tag_type="loss",
             big_value=f"${latest_brent:.2f}",
             delta_text=f"30d: {brent_30d_pct:+.1f}% · vs nền: {brent_vs_base_pct:+.1f}% · Vol {latest_vol_30d:.2f}%",
             spark_vals=sp_brent,
@@ -648,41 +756,42 @@ if page.startswith("Trang 1"):
 
     with col_cape:
         sp_cape = ((df_rr_win["cape_ma7_total"] - base_cape) * 100.0 / base_cape).iloc[::step_s].tolist()
-        render_tagged_kpi_card(
+        render_kpi_card(
             title="Tuyến đi vòng Mũi Hảo Vọng",
-            tag_type="gain",
             big_value=f"{cape_pct_vs_base:+.1f}%",
-            delta_text=f"{base_cape:.0f} → {cape_win_avg:.0f} tàu/ng · Hấp thụ {cape_share_win:.1f}%",
+            delta_text=f"{base_cape:.0f} → {cape_win_avg:.0f} tàu/ngày · Hấp thụ {cape_share_win:.1f}%",
             spark_vals=sp_cape,
             status="good" if cape_pct_vs_base >= 20 else "neutral",
         )
 
     # Biểu đồ chính Trang 1: Chạy riêng theo đúng danh sách selected_ports_p1 & TỰ RESIZE theo số lượng đường
     n_p1_traces = len(selected_ports_p1)
-    p1_height = min(740, max(370, 325 + n_p1_traces * 24 + calc_legend_top_margin(n_p1_traces + 2, base_top=0)))
+    p1_height = min(760, max(395, 350 + n_p1_traces * 24 + calc_legend_top_margin(n_p1_traces + 3, base_top=0)))
 
     fig_c = make_subplots(
         rows=2,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.09,
+        vertical_spacing=0.10,
         row_heights=[0.55, 0.45],
         subplot_titles=(
             f"Lưu lượng {n_p1_traces} điểm nghẽn đang chọn (% lệch MA7 so với nền 2021–2022)",
-            "Đồng biến động Giá dầu Brent & Diesel ULSD proxy ($/bbl)",
+            "Đồng biến động Giá dầu thô Brent, Diesel ULSD proxy & Biên lọc dầu Crack Spread ($/bbl)",
         ),
     )
 
     for i, pname in enumerate(selected_ports_p1):
         sub_p = df_sel_tr[df_sel_tr["portname"] == pname].sort_values("observation_date")
         p_base = float(base_map[pname])
+        p_role_vi = ROLE_SHORT_VI.get(role_map.get(pname, ""), "")
         y_pct = (sub_p["n_total_ma7"] - p_base) * 100.0 / p_base if p_base > 0 else 0.0
         fig_c.add_trace(
             go.Scatter(
                 x=sub_p["observation_date"],
                 y=y_pct,
-                name=pname,
+                name=f"{pname} ({p_role_vi})" if p_role_vi else pname,
                 line=dict(color=TRACE_PALETTE[i % len(TRACE_PALETTE)], width=2.0),
+                hovertemplate=f"<b>{pname}</b> ({p_role_vi})<br>Lệch MA7 vs nền: %{{y:+.1f}}%<extra></extra>",
             ),
             row=1,
             col=1,
@@ -709,15 +818,25 @@ if page.startswith("Trang 1"):
         row=2,
         col=1,
     )
+    fig_c.add_trace(
+        go.Scatter(
+            x=df_en_win["calendar_date"],
+            y=df_en_win["diesel_brent_crack_bbl"],
+            name="Crack Spread (ULSD − Brent, $/bbl)",
+            line=dict(color=COLOR_AMBER, width=1.5, dash="dash"),
+        ),
+        row=2,
+        col=1,
+    )
 
-    add_event_bands_with_names(fig_c, dim_events, win_min=p1_start, win_max=p1_end)
+    add_event_bands_with_names(fig_c, dim_events, win_min=p1_start, win_max=p1_end, n_rows=2)
 
     fig_c.update_layout(
         height=p1_height,
-        margin=dict(l=8, r=8, t=calc_legend_top_margin(n_p1_traces + 2, base_top=32), b=8),
+        margin=dict(l=8, r=8, t=calc_legend_top_margin(n_p1_traces + 3, base_top=48), b=8),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=10.5)),
+        legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="right", x=1, font=dict(size=10.2)),
         hovermode="x unified",
     )
     fig_c.update_annotations(font_size=11.5)
@@ -730,7 +849,7 @@ if page.startswith("Trang 1"):
 
 
 # ===========================================================================
-# TRANG 2: PHÂN TÍCH ĐIỂM NGHẼN, BẢN ĐỒ LƯU LƯỢNG & GIÁ NĂNG LƯỢNG
+# TRANG 2: PHÂN TÍCH ĐIỂM NGHẼN, BẢN ĐỒ HÀNH LANG ĐỔI TUYẾN & GIÁ NĂNG LƯỢNG
 # ===========================================================================
 else:
     st_start, st_end = win_start, win_end
@@ -766,15 +885,111 @@ else:
     )
 
     # -----------------------------------------------------------------------
-    # HÀNG TRÊN: BẢN ĐỒ NHIỆT THEO TUẦN  |  DIỄN BIẾN LƯU LƯỢNG VS DẢI NỀN & AIS
+    # HÀNG KPI TRANG 2: THEO ĐÚNG SỐ LƯỢNG TÀU, ĐỊA ĐIỂM & ĐỒNG BỘ NỘI DUNG 4 BIỂU ĐỒ PHÍA DƯỚI
+    # -----------------------------------------------------------------------
+    p2_step_s = max(1, len(df_win_sel) // (55 * max(1, len(selected_ports_p2))))
+    worst_p2 = port_order[0] if port_order else ""
+    best_p2 = port_order[-1] if port_order else ""
+
+    p2_kpi_c1, p2_kpi_c2, p2_kpi_c3, p2_kpi_c4 = st.columns(4)
+
+    with p2_kpi_c1:
+        # KPI 1: Thể hiện điểm nghẽn giảm mạnh nhất (dẫn dắt Biểu đồ 1 & 2)
+        w_df = df_win_sel[df_win_sel["portname"] == worst_p2].sort_values("observation_date")
+        w_avg = float(w_df[v_col].mean()) if not w_df.empty else 0.0
+        w_pct = float(w_df["v_pct_base"].mean()) if not w_df.empty else 0.0
+        w_base = float(base_v_map.get(worst_p2, 0.0))
+        w_role = ROLE_SHORT_VI.get(role_map.get(worst_p2, ""), "")
+        w_sp = w_df[v_col].rolling(7, min_periods=1).mean().iloc[::p2_step_s].tolist()
+        render_kpi_card(
+            title=f"ĐIỂM NGHẼN NẶNG NHẤT: {worst_p2}",
+            big_value=f"{w_avg:.1f} tàu/ngày",
+            delta_text=f"Lệch vs nền: {w_pct:+.1f}% (Nền {w_base:.1f} tàu/ngày) · {w_role}",
+            spark_vals=w_sp,
+            status="critical" if w_pct <= -25 else ("warning" if w_pct <= -10 else "neutral"),
+        )
+
+    with p2_kpi_c2:
+        # KPI 2: Thể hiện chất lượng dữ liệu & tín hiệu cảnh báo AIS (dẫn dắt Chấm xám / Vàng trên Biểu đồ 2)
+        df_p2_out = fact_outlier[
+            (fact_outlier["portname"].isin(selected_ports_p2))
+            & (fact_outlier["observation_date"] >= st_start)
+            & (fact_outlier["observation_date"] <= st_end)
+        ]
+        n_p2_glitch = int((df_p2_out["chokepoint_label_code"] == "L10").sum())
+        n_p2_shocks = int(df_p2_out["is_shock_consensus_outlier"].fillna(False).sum())
+        n_p2_struct = int(df_p2_out["is_struct_consensus_outlier"].fillna(False).sum())
+        render_kpi_card(
+            title=f"TÍN HIỆU CẢNH BÁO ({len(selected_ports_p2)} ĐIỂM)",
+            big_value=f"{n_p2_shocks} cú sốc",
+            delta_text=f"{n_p2_struct} ngày đổi chế độ · {n_p2_glitch} ngày nghi lỗi AIS (L10)",
+            spark_vals=[0, n_p2_glitch, n_p2_shocks, n_p2_struct],
+            status="warning" if (n_p2_shocks + n_p2_glitch) > 0 else "good",
+        )
+
+    with p2_kpi_c3:
+        # KPI 3: Thể hiện hành lang đổi tuyến thay thế (dẫn dắt Bản đồ số 3)
+        p2_reroutes = dim_rerouting_map[dim_rerouting_map["primary_portname"].isin(selected_ports_p2)]
+        alt_names_p2 = [str(a) for a in p2_reroutes["alt_portname"].dropna().unique().tolist() if str(a).strip() != ""]
+        if alt_names_p2:
+            alt_df_p2 = fact_transit[
+                (fact_transit["portname"].isin(alt_names_p2))
+                & (fact_transit["observation_date"] >= st_start)
+                & (fact_transit["observation_date"] <= st_end)
+            ]
+            alt_avg_flow = float(alt_df_p2[v_col].mean()) if not alt_df_p2.empty else 0.0
+            alt_pct = float(alt_df_p2["pct_vs_baseline_total"].mean()) if not alt_df_p2.empty else 0.0
+            render_kpi_card(
+                title=f"TUYẾN THAY THẾ: {alt_names_p2[0]}",
+                big_value=f"{alt_avg_flow:.1f} tàu/ngày",
+                delta_text=f"Lưu lượng tăng {alt_pct:+.1f}% vs nền · Hấp thụ tải",
+                spark_vals=alt_df_p2[v_col].rolling(7, min_periods=1).mean().iloc[::p2_step_s].tolist(),
+                status="good" if alt_pct >= 20 else "neutral",
+            )
+        else:
+            render_kpi_card(
+                title="HÀNH LANG THAY THẾ TRÊN BIỂN",
+                big_value="KHÔNG CÓ",
+                delta_text="Yết hầu xuất khẩu độc đạo (Nguồn cung bị nghẽn trực tiếp)",
+                spark_vals=[0, 0, 0, 0],
+                status="critical",
+            )
+
+    with p2_kpi_c4:
+        # KPI 4: Thể hiện liên hệ với giá năng lượng (dẫn dắt Biểu đồ số 4)
+        latest_en_p2 = fact_energy[
+            (fact_energy["calendar_date"] >= st_start) & (fact_energy["calendar_date"] <= st_end)
+        ]
+        brent_now = float(latest_en_p2["brent_usd_per_bbl"].iloc[-1]) if not latest_en_p2.empty else 0.0
+        brent_first = float(latest_en_p2["brent_usd_per_bbl"].iloc[0]) if not latest_en_p2.empty else brent_now
+        brent_chg = (brent_now - brent_first) * 100.0 / brent_first if brent_first > 0 else 0.0
+        crack_now = float(latest_en_p2["diesel_brent_crack_bbl"].iloc[-1]) if not latest_en_p2.empty else 0.0
+        render_kpi_card(
+            title="GIÁ NĂNG LƯỢNG KỲ NÀY",
+            big_value=f"${brent_now:.2f}",
+            delta_text=f"So với đầu kỳ: {brent_chg:+.1f}% · Biên lọc dầu: ${crack_now:.2f}/thùng",
+            spark_vals=latest_en_p2["brent_usd_per_bbl"].iloc[::p2_step_s].tolist(),
+            status="critical" if brent_now >= 100 else ("warning" if brent_chg >= 10 else "neutral"),
+        )
+
+    # -----------------------------------------------------------------------
+    # HÀNG TRÊN: BẢN ĐỒ NHIỆT THEO TUẦN  |  DIỄN BIẾN LƯU LƯỢNG VS DẢI NỀN & ĐỒNG THUẬN KÉP (L01-L10)
     # -----------------------------------------------------------------------
     top_c1, top_c2 = st.columns([1.0, 1.15])
 
     with top_c1:
         st.markdown(
-            f'<div class="section-title">Biến động lưu lượng theo tuần tại các điểm nghẽn đã chọn ({v_desc})</div>',
+            f'<div class="section-title">Lưu lượng tàu qua các điểm nghẽn đã chọn ({v_desc})</div>',
             unsafe_allow_html=True,
         )
+        chart_mode_c1 = st.radio(
+            "Kiểu biểu đồ",
+            options=["📊 Biểu đồ Cột (Lưu lượng / So với nền)", "🗺️ Bản đồ nhiệt (Heatmap theo tuần)"],
+            horizontal=True,
+            key="p2_chart_mode_c1",
+            label_visibility="collapsed",
+        )
+
         df_hm = df_win_sel.copy()
         df_hm["week_start"] = df_hm["observation_date"].dt.to_period("W").apply(lambda r: r.start_time)
         hm_piv = (
@@ -786,47 +1001,126 @@ else:
             .round(1)
         )
 
-        # Tự co giãn chiều cao Heatmap theo số lượng điểm nghẽn được chọn
-        n_hm_rows = len(hm_piv.index)
-        hm_height = min(680, max(210, 115 + n_hm_rows * 36))
+        # Tính tổng/trung bình tàu theo tuần cho biểu đồ cột
+        flow_piv = (
+            df_hm.groupby(["portname", "week_start"])[v_col]
+            .mean()
+            .unstack("week_start")
+            .reindex(port_order)
+            .round(1)
+        )
 
-        fig_hm = go.Figure(
-            data=go.Heatmap(
-                z=hm_piv.values,
-                x=hm_piv.columns,
-                y=hm_piv.index,
-                colorscale=[
-                    [0.0, "#D92D20"],
-                    [0.32, "#F79009"],
-                    [0.50, "#94A3B8"],
-                    [0.75, "#32D583"],
-                    [1.0, "#039855"],
-                ],
-                zmin=-80,
-                zmax=80,
-                colorbar=dict(title="% nền", thickness=10, len=0.9),
-                hovertemplate="Điểm nghẽn: %{y}<br>Tuần: %{x|%d/%m/%Y}<br>Lệch vs nền: %{z:+.1f}%<extra></extra>",
+        n_hm_rows = len(port_order)
+        hm_height = min(680, max(250, 150 + n_hm_rows * 36))
+
+        if chart_mode_c1.startswith("📊"):
+            fig_hm = go.Figure()
+            for idx, pname in enumerate(port_order):
+                if pname in flow_piv.index:
+                    s_vals = flow_piv.loc[pname]
+                    p_pct = hm_piv.loc[pname] if pname in hm_piv.index else None
+                    color_bar = TRACE_PALETTE[idx % len(TRACE_PALETTE)]
+                    role_sub = ROLE_SHORT_VI.get(role_map.get(pname, ""), "")
+                    fig_hm.add_trace(
+                        go.Bar(
+                            x=flow_piv.columns,
+                            y=s_vals.values,
+                            name=f"{pname} [{role_sub}]" if role_sub else pname,
+                            marker=dict(color=color_bar),
+                            customdata=p_pct.values if p_pct is not None else [0] * len(s_vals),
+                            hovertemplate=(
+                                f"<b>{pname}</b><br>Tuần: %{{x|%d/%m/%Y}}<br>"
+                                "Lưu lượng TB: <b>%{y:.1f} tàu/ngày</b><br>"
+                                "So với nền: <b>%{customdata:+.1f}%</b><extra></extra>"
+                            ),
+                        )
+                    )
+            fig_hm.update_layout(
+                height=hm_height,
+                barmode="group",
+                margin=dict(l=4, r=4, t=calc_legend_top_margin(n_hm_rows, 16), b=4),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=9.5)),
+                yaxis=dict(title="Tàu / ngày (TB tuần)", gridcolor=GRID_COLOR, tickfont=dict(size=9.5)),
+                xaxis=dict(gridcolor=GRID_COLOR, tickfont=dict(size=9.5)),
+                hovermode="x unified",
             )
-        )
-        fig_hm.update_layout(
-            height=hm_height,
-            margin=dict(l=4, r=4, t=8, b=4),
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            yaxis=dict(autorange="reversed", tickfont=dict(size=10.5)),
-            xaxis=dict(tickfont=dict(size=9.5)),
-        )
+        else:
+            # Gắn thêm thông tin vai trò điểm nghẽn & tỷ trọng tàu dầu vào customdata trên Heatmap
+            hm_y_labels = [
+                f"{p} [{ROLE_SHORT_VI.get(role_map.get(p, ''), '')}]" for p in hm_piv.index
+            ]
+            hm_custom = np.array(
+                [
+                    [
+                        f"{ROLE_VI_MAP.get(role_map.get(p, ''), '')} · Nền: {base_v_map.get(p, 0):.1f} tàu/ngày · Tỷ trọng Tanker: {tanker_share_map.get(p, 0):.1f}%"
+                        for _ in hm_piv.columns
+                    ]
+                    for p in hm_piv.index
+                ],
+                dtype=object,
+            )
+
+            fig_hm = go.Figure(
+                data=go.Heatmap(
+                    z=hm_piv.values,
+                    x=hm_piv.columns,
+                    y=hm_y_labels,
+                    customdata=hm_custom,
+                    colorscale=[
+                        [0.0, "#D92D20"],
+                        [0.32, "#F79009"],
+                        [0.50, "#94A3B8"],
+                        [0.75, "#32D583"],
+                        [1.0, "#039855"],
+                    ],
+                    zmin=-80,
+                    zmax=80,
+                    colorbar=dict(title="% nền", thickness=10, len=0.9),
+                    hovertemplate=(
+                        "<b>%{y}</b><br>Tuần: %{x|%d/%m/%Y}<br>"
+                        "Lệch vs nền 2021–22: <b>%{z:+.1f}%</b><br>%{customdata}<extra></extra>"
+                    ),
+                )
+            )
+            fig_hm.update_layout(
+                height=hm_height,
+                margin=dict(l=4, r=4, t=8, b=4),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                yaxis=dict(autorange="reversed", tickfont=dict(size=10.2)),
+                xaxis=dict(tickfont=dict(size=9.5)),
+            )
         st.plotly_chart(fig_hm, width="stretch", config={"displayModeBar": False})
 
     with top_c2:
-        # Diễn biến lưu lượng thực tế vs dải nền & chấm xám nghi lỗi AIS (tự resize theo số lượng đại lượng)
+        # Diễn biến lưu lượng thực tế vs dải nền + Cú sốc ngắn hạn I(0) (AO/IO/TC) + Nghi lỗi AIS (L10)
         n_sel = len(selected_ports_p2)
-        q2_height = min(680, max(280, 235 + n_sel * 26 + calc_legend_top_margin(n_sel + 2, 0)))
+        q2_height = min(680, max(285, 240 + n_sel * 26 + calc_legend_top_margin(n_sel + 3, 0)))
+
+        outlier_cols = [
+            "observation_date",
+            "portname",
+            "chokepoint_label_code",
+            "chokepoint_ts_label",
+            "chokepoint_domain_label",
+            "is_shock_consensus_outlier",
+            "is_struct_consensus_outlier",
+            "shock_mod_z_90d",
+            "struct_mod_z_base",
+        ]
+        df_out_win = fact_outlier[
+            (fact_outlier["portname"].isin(selected_ports_p2))
+            & (fact_outlier["observation_date"] >= st_start)
+            & (fact_outlier["observation_date"] <= st_end)
+        ][outlier_cols].copy()
 
         if n_sel == 1:
             single_port = selected_ports_p2[0]
+            single_role_vi = ROLE_SHORT_VI.get(role_map.get(single_port, ""), "")
             st.markdown(
-                f'<div class="section-title">Diễn biến lưu lượng tại <code>{single_port}</code> so với dải nền & cảnh báo nghi lỗi AIS</div>',
+                f'<div class="section-title">Diễn biến tại <code>{single_port}</code> ({single_role_vi}) vs dải nền &amp; phân loại bất thường (L01–L10)</div>',
                 unsafe_allow_html=True,
             )
             sel_base_mean = float(base_v_map[single_port])
@@ -838,13 +1132,18 @@ else:
                 (fact_transit["portname"] == single_port)
                 & (fact_transit["observation_date"] >= st_start)
                 & (fact_transit["observation_date"] <= st_end)
-            ][["observation_date", v_col]].copy()
-            df_q2_lbl = fact_outlier[fact_outlier["portname"] == single_port][
-                ["observation_date", "chokepoint_label_code"]
-            ]
-            df_q2 = pd.merge(df_q2_tr, df_q2_lbl, on="observation_date", how="left").sort_values("observation_date")
+            ][["observation_date", v_col, "n_total_zscore_90d"]].copy()
+            df_q2 = pd.merge(
+                df_q2_tr,
+                df_out_win[df_out_win["portname"] == single_port],
+                on="observation_date",
+                how="left",
+            ).sort_values("observation_date")
             df_q2["v_ma7"] = df_q2[v_col].rolling(7, min_periods=1).mean()
+
+            df_q2_shock = df_q2[df_q2["is_shock_consensus_outlier"].fillna(False)]
             df_q2_glitch = df_q2[df_q2["chokepoint_label_code"] == "L10"]
+            n_struct_days = int(df_q2["is_struct_consensus_outlier"].fillna(False).sum())
 
             fig_q2 = go.Figure()
             fig_q2.add_trace(
@@ -862,24 +1161,37 @@ else:
                 y=sel_base_mean,
                 line_dash="dash",
                 line_color=COLOR_SLATE,
-                annotation_text=f"Nền TB: {sel_base_mean:.1f}",
+                annotation_text=f"Nền TB: {sel_base_mean:.1f} (LS: {n_struct_days} ngày)",
                 annotation_position="bottom right",
                 annotation_font_size=10,
             )
             fig_q2.add_trace(
-                go.Scatter(
+                go.Bar(
                     x=df_q2["observation_date"],
                     y=df_q2[v_col],
-                    name="Lưu lượng ngày",
-                    line=dict(color="rgba(148, 163, 184, 0.45)", width=1.0),
+                    name="Lưu lượng ngày (Cột)",
+                    marker=dict(color="rgba(148, 163, 184, 0.45)", line=dict(width=0)),
                 )
             )
             fig_q2.add_trace(
                 go.Scatter(
                     x=df_q2["observation_date"],
                     y=df_q2["v_ma7"],
+                    customdata=df_q2["chokepoint_domain_label"].fillna("L00: Normal Maritime Flow"),
                     name=f"MA7 ({v_desc})",
                     line=dict(color=COLOR_PRIMARY, width=2.3),
+                    hovertemplate="MA7: %{y:.1f} tàu/ngày<br>Nhãn chế độ: %{customdata}<extra></extra>",
+                )
+            )
+            fig_q2.add_trace(
+                go.Scatter(
+                    x=df_q2_shock["observation_date"],
+                    y=df_q2_shock[v_col],
+                    text=df_q2_shock["chokepoint_domain_label"],
+                    mode="markers",
+                    name=f"Cú sốc ngắn hạn I(0) (AO/IO/TC: {len(df_q2_shock)} ngày)",
+                    marker=dict(color=COLOR_AMBER, size=7.5, symbol="diamond", line=dict(color="#FFFFFF", width=0.8)),
+                    hovertemplate="Ngày: %{x|%d/%m/%Y}<br>Lưu lượng: %{y} tàu<br><b>%{text}</b><extra></extra>",
                 )
             )
             fig_q2.add_trace(
@@ -894,47 +1206,70 @@ else:
             y_title_q2 = "Tàu / ngày"
         else:
             st.markdown(
-                f'<div class="section-title">Diễn biến lưu lượng nhóm {n_sel} điểm nghẽn đã chọn (% lệch MA7 so với nền & nghi lỗi AIS)</div>',
+                f'<div class="section-title">Diễn biến nhóm {n_sel} điểm nghẽn (% lệch MA7 vs nền &amp; cú sốc đồng thuận kép L01–L10)</div>',
                 unsafe_allow_html=True,
             )
-            df_q2_lbl_all = fact_outlier[
-                (fact_outlier["portname"].isin(selected_ports_p2))
-                & (fact_outlier["observation_date"] >= st_start)
-                & (fact_outlier["observation_date"] <= st_end)
-                & (fact_outlier["chokepoint_label_code"] == "L10")
-            ][["observation_date", "portname"]].copy()
-
             fig_q2 = go.Figure()
+            shock_x, shock_y, shock_txt = [], [], []
             glitch_x, glitch_y, glitch_txt = [], [], []
+
             for idx, pname in enumerate(port_order):
                 sub = df_win_sel[df_win_sel["portname"] == pname].sort_values("observation_date").copy()
                 pbase = float(base_v_map.get(pname, 0.0))
                 sub["ma7"] = sub[v_col].rolling(7, min_periods=1).mean()
                 sub["pct_ma7"] = (sub["ma7"] - pbase) * 100.0 / pbase if pbase > 0 else np.nan
+                sub_lbl = pd.merge(
+                    sub,
+                    df_out_win[df_out_win["portname"] == pname],
+                    on=["observation_date", "portname"],
+                    how="left",
+                )
                 fig_q2.add_trace(
-                    go.Scatter(
+                    go.Bar(
                         x=sub["observation_date"],
                         y=sub["pct_ma7"],
+                        customdata=sub_lbl["chokepoint_domain_label"].fillna("L00: Normal Maritime Flow"),
                         name=pname,
-                        line=dict(color=TRACE_PALETTE[idx % len(TRACE_PALETTE)], width=2.0),
+                        marker=dict(color=TRACE_PALETTE[idx % len(TRACE_PALETTE)], opacity=0.75),
+                        hovertemplate=f"<b>{pname}</b>: %{{y:+.1f}}%<br>%{{customdata}}<extra></extra>",
                     )
                 )
-                g_sub = sub.merge(df_q2_lbl_all[df_q2_lbl_all["portname"] == pname], on="observation_date", how="inner")
+                s_sub = sub_lbl[sub_lbl["is_shock_consensus_outlier"].fillna(False)]
+                if not s_sub.empty:
+                    shock_x.extend(s_sub["observation_date"].tolist())
+                    shock_y.extend(s_sub["pct_ma7"].tolist())
+                    shock_txt.extend(
+                        [f"{pname} · {lbl}" for lbl in s_sub["chokepoint_domain_label"].tolist()]
+                    )
+                g_sub = sub_lbl[sub_lbl["chokepoint_label_code"] == "L10"]
                 if not g_sub.empty:
                     glitch_x.extend(g_sub["observation_date"].tolist())
                     glitch_y.extend(g_sub["pct_ma7"].tolist())
                     glitch_txt.extend([pname] * len(g_sub))
 
-            fig_q2.add_hline(y=0, line_dash="dot", line_color=COLOR_SLATE, annotation_text="Nền (0%)", annotation_font_size=10)
+            fig_q2.add_hline(
+                y=0, line_dash="dot", line_color=COLOR_SLATE, annotation_text="Nền (0%)", annotation_font_size=10
+            )
+            fig_q2.add_trace(
+                go.Scatter(
+                    x=shock_x,
+                    y=shock_y,
+                    text=shock_txt,
+                    mode="markers",
+                    name=f"Cú sốc I(0) đồng thuận kép (AO/IO/TC: {len(shock_x)})",
+                    marker=dict(color=COLOR_AMBER, size=7.5, symbol="diamond", line=dict(color="#FFFFFF", width=0.8)),
+                    hovertemplate="%{text}<br>Ngày: %{x|%d/%m/%Y}<br>Lệch MA7: %{y:+.1f}%<extra></extra>",
+                )
+            )
             fig_q2.add_trace(
                 go.Scatter(
                     x=glitch_x,
                     y=glitch_y,
                     text=glitch_txt,
                     mode="markers",
-                    name=f"Nghi lỗi AIS (L10: {len(glitch_x)} điểm)",
+                    name=f"Nghi lỗi AIS (L10: {len(glitch_x)})",
                     marker=dict(color=COLOR_GRAY_DOT, size=7, symbol="circle", line=dict(color="#FFFFFF", width=0.8)),
-                    hovertemplate="%{text}<br>Ngày: %{x|%d/%m/%Y}<br>Lệch nền: %{y:+.1f}% (Nghi lỗi AIS)<extra></extra>",
+                    hovertemplate="%{text}<br>Ngày: %{x|%d/%m/%Y}<br>Lệch nền: %{y:+.1f}% (Nghi lỗi AIS L10)<extra></extra>",
                 )
             )
             y_title_q2 = "% lệch MA7 vs nền"
@@ -942,7 +1277,8 @@ else:
         add_event_bands_with_names(fig_q2, dim_events, win_min=st_start, win_max=st_end)
         fig_q2.update_layout(
             height=q2_height,
-            margin=dict(l=6, r=6, t=calc_legend_top_margin(n_sel + 2, 16), b=6),
+            barmode="group",
+            margin=dict(l=6, r=6, t=calc_legend_top_margin(n_sel + 3, 16), b=6),
             yaxis_title=y_title_q2,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=9.5)),
             hovermode="x unified",
@@ -954,41 +1290,106 @@ else:
         st.plotly_chart(fig_q2, width="stretch", config={"displayModeBar": False})
 
     # -----------------------------------------------------------------------
-    # HÀNG DƯỚI: BẢN ĐỒ PHÂN BỐ LƯU LƯỢNG BẰNG DẤU CHẤM  |  ĐỒNG BIẾN ĐỘNG GIÁ
+    # HÀNG DƯỚI: BẢN ĐỒ LƯU LƯỢNG & HÀNH LANG ĐỔI TUYẾN  |  ĐỒNG BIẾN ĐỘNG I(1) & TƯƠNG QUAN TRƯỢT I(0)
     # -----------------------------------------------------------------------
     bot_c1, bot_c2 = st.columns([1.05, 1.10])
 
     with bot_c1:
         st.markdown(
-            f'<div class="section-title">Bản đồ phân bố lưu lượng & biến động tại các điểm nghẽn ({v_desc})</div>',
+            f'<div class="section-title">Bản đồ phân bố lưu lượng, vai trò điểm nghẽn &amp; hành lang tuyến thay thế ({v_desc})</div>',
             unsafe_allow_html=True,
         )
         map_agg = (
             df_win_all.groupby("portname", as_index=False)
             .agg(avg_flow=(v_col, "mean"), avg_pct=("v_pct_base", "mean"))
-            .merge(dim_chokepoints[["portname", "latitude", "longitude", "maritime_region"]], on="portname", how="left")
+            .merge(
+                dim_chokepoints[
+                    ["portname", "latitude", "longitude", "maritime_region", "chokepoint_role", "avg_tanker_share_pct"]
+                ],
+                on="portname",
+                how="left",
+            )
         )
+        map_agg["role_vi"] = map_agg["chokepoint_role"].map(ROLE_SHORT_VI).fillna("")
         map_agg["is_selected"] = map_agg["portname"].isin(selected_ports_p2)
         map_agg["avg_pct_clean"] = map_agg["avg_pct"].fillna(0.0).clip(-80, 80)
+
+        # Tìm các tuyến thay thế được ánh xạ từ các điểm nghẽn đang chọn (từ dim_chokepoint_rerouting_map)
+        sel_reroute_rows = dim_rerouting_map[dim_rerouting_map["primary_portname"].isin(selected_ports_p2)].copy()
+        mapped_alt_names = [
+            str(a) for a in sel_reroute_rows["alt_portname"].dropna().unique().tolist() if str(a).strip() != ""
+        ]
+        map_agg["is_alt_route"] = map_agg["portname"].isin(mapped_alt_names) & (~map_agg["is_selected"])
 
         # Quy mô chấm tỉ lệ trực tiếp theo lưu lượng thực tế
         max_flow = max(1.0, float(map_agg["avg_flow"].max()))
         map_agg["dot_size"] = 10.0 + (map_agg["avg_flow"] / max_flow) * 28.0
 
-        unsel_df = map_agg[~map_agg["is_selected"]]
+        unsel_df = map_agg[~map_agg["is_selected"] & ~map_agg["is_alt_route"]]
+        alt_df = map_agg[map_agg["is_alt_route"]]
         sel_df = map_agg[map_agg["is_selected"]]
+        coord_lookup = map_agg.set_index("portname")[["latitude", "longitude", "avg_flow", "avg_pct_clean"]].to_dict(
+            orient="index"
+        )
 
         fig_map = go.Figure()
-        # Các điểm nghẽn còn lại làm nền bối cảnh (chấm mờ nhỏ hơn)
+
+        # Vẽ đường kết nối hành lang đổi tuyến giữa Điểm nghẽn chính đang chọn <-> Tuyến thay thế
+        corridor_summaries: list[str] = []
+        line_lons: list[float | None] = []
+        line_lats: list[float | None] = []
+        for _, rmap in sel_reroute_rows.iterrows():
+            p_name = str(rmap["primary_portname"])
+            a_name = str(rmap["alt_portname"]) if pd.notna(rmap["alt_portname"]) else ""
+            if a_name and p_name in coord_lookup and a_name in coord_lookup:
+                p_info = coord_lookup[p_name]
+                a_info = coord_lookup[a_name]
+                line_lons.extend([p_info["longitude"], a_info["longitude"], None])
+                line_lats.extend([p_info["latitude"], a_info["latitude"], None])
+
+                p_base_v = float(base_v_map.get(p_name, 0.0))
+                a_base_v = float(base_v_map.get(a_name, 0.0))
+                comb_base = p_base_v + a_base_v
+                comb_now = float(p_info["avg_flow"] + a_info["avg_flow"])
+                comb_pct = (comb_now - comb_base) * 100.0 / comb_base if comb_base > 0 else 0.0
+                alt_share = float(a_info["avg_flow"]) * 100.0 / comb_now if comb_now > 0 else 0.0
+                corridor_summaries.append(
+                    f"🔄 <b>{rmap['corridor_name_vi']}</b>: <code>{p_name}</code> ({p_info['avg_pct_clean']:+.1f}%) "
+                    f"↔ <code>{a_name}</code> ({a_info['avg_pct_clean']:+.1f}%, chiếm <b>{alt_share:.1f}%</b> hành lang) "
+                    f"· Tổng 2 tuyến: <b>{comb_now:.1f} tàu/ngày ({comb_pct:+.1f}% vs nền)</b>."
+                )
+            elif p_name in coord_lookup:
+                p_info = coord_lookup[p_name]
+                corridor_summaries.append(
+                    f"⛔ <b>{rmap['corridor_name_vi']}</b> (<code>{p_name}</code>: {p_info['avg_pct_clean']:+.1f}% vs nền): "
+                    f"<i>{rmap['rerouting_note_vi']}</i>"
+                )
+
+        if line_lons:
+            fig_map.add_trace(
+                go.Scattergeo(
+                    lon=line_lons,
+                    lat=line_lats,
+                    mode="lines",
+                    name="Hành lang đổi tuyến",
+                    line=dict(width=1.8, color=COLOR_TEAL, dash="dot"),
+                    hoverinfo="skip",
+                )
+            )
+
+        # Các điểm nghẽn còn lại làm nền bối cảnh
         if not unsel_df.empty:
             fig_map.add_trace(
                 go.Scattergeo(
                     lon=unsel_df["longitude"],
                     lat=unsel_df["latitude"],
                     text=unsel_df["portname"],
-                    customdata=np.stack([unsel_df["avg_flow"], unsel_df["avg_pct_clean"]], axis=-1),
+                    customdata=np.stack(
+                        [unsel_df["avg_flow"], unsel_df["avg_pct_clean"], unsel_df["role_vi"], unsel_df["avg_tanker_share_pct"]],
+                        axis=-1,
+                    ),
                     mode="markers",
-                    name="Điểm nghẽn khác (tham chiếu)",
+                    name="Điểm nghẽn khác",
                     marker=dict(
                         size=unsel_df["dot_size"] * 0.72,
                         color=unsel_df["avg_pct_clean"],
@@ -998,17 +1399,56 @@ else:
                         opacity=0.35,
                         line=dict(width=0.6, color="rgba(148,163,184,0.6)"),
                     ),
-                    hovertemplate="<b>%{text}</b><br>TB lưu lượng: %{customdata[0]:.1f} tàu/ng<br>So với nền: %{customdata[1]:+.1f}%<extra></extra>",
+                    hovertemplate=(
+                        "<b>%{text}</b> (%{customdata[2]})<br>"
+                        "TB lưu lượng: %{customdata[0]:.1f} tàu/ngày (Tanker: %{customdata[3]:.1f}%)<br>"
+                        "So với nền: %{customdata[1]:+.1f}%<extra></extra>"
+                    ),
                 )
             )
 
-        # Các điểm nghẽn đang được chọn trong bộ lọc (chấm đậm nổi bật kèm tên)
+        # Các tuyến thay thế tương ứng với điểm nghẽn đang chọn
+        if not alt_df.empty:
+            fig_map.add_trace(
+                go.Scattergeo(
+                    lon=alt_df["longitude"],
+                    lat=alt_df["latitude"],
+                    text=alt_df.apply(lambda r: f"↪ {r['portname']} ({r['avg_pct_clean']:+.0f}%)", axis=1),
+                    customdata=np.stack(
+                        [alt_df["avg_flow"], alt_df["avg_pct_clean"], alt_df["role_vi"], alt_df["avg_tanker_share_pct"]],
+                        axis=-1,
+                    ),
+                    mode="markers+text",
+                    textposition="bottom center",
+                    textfont=dict(size=9.2),
+                    name="Tuyến thay thế ánh xạ",
+                    marker=dict(
+                        size=alt_df["dot_size"] * 0.90,
+                        color=alt_df["avg_pct_clean"],
+                        colorscale=[[0.0, "#F04438"], [0.45, "#F79009"], [0.55, "#94A3B8"], [1.0, "#12B76A"]],
+                        cmin=-70,
+                        cmax=70,
+                        opacity=0.90,
+                        line=dict(width=2.2, color=COLOR_TEAL),
+                    ),
+                    hovertemplate=(
+                        "<b>%{text}</b> (%{customdata[2]})<br>"
+                        "TB lưu lượng: %{customdata[0]:.1f} tàu/ngày (Tanker: %{customdata[3]:.1f}%)<br>"
+                        "So với nền: %{customdata[1]:+.1f}%<extra></extra>"
+                    ),
+                )
+            )
+
+        # Các điểm nghẽn đang được chọn trong bộ lọc
         fig_map.add_trace(
             go.Scattergeo(
                 lon=sel_df["longitude"],
                 lat=sel_df["latitude"],
                 text=sel_df.apply(lambda r: f"{r['portname']} ({r['avg_pct_clean']:+.0f}%)", axis=1),
-                customdata=np.stack([sel_df["avg_flow"], sel_df["avg_pct_clean"]], axis=-1),
+                customdata=np.stack(
+                    [sel_df["avg_flow"], sel_df["avg_pct_clean"], sel_df["role_vi"], sel_df["avg_tanker_share_pct"]],
+                    axis=-1,
+                ),
                 mode="markers+text",
                 textposition="top center",
                 textfont=dict(size=9.5),
@@ -1023,11 +1463,15 @@ else:
                     colorbar=dict(title="% nền", thickness=10, len=0.78),
                     line=dict(width=2.0, color="#2E90FA"),
                 ),
-                hovertemplate="<b>%{text}</b><br>TB lưu lượng: %{customdata[0]:.1f} tàu/ng<br>So với nền: %{customdata[1]:+.1f}%<extra></extra>",
+                hovertemplate=(
+                    "<b>%{text}</b> (%{customdata[2]})<br>"
+                    "TB lưu lượng: %{customdata[0]:.1f} tàu/ngày (Tanker: %{customdata[3]:.1f}%)<br>"
+                    "So với nền: %{customdata[1]:+.1f}%<extra></extra>"
+                ),
             )
         )
 
-        map_height = min(540, max(350, 325 + len(sel_df) * 12))
+        map_height = min(560, max(360, 330 + len(sel_df) * 12))
         fig_map.update_layout(
             height=map_height,
             margin=dict(l=4, r=4, t=8, b=4),
@@ -1049,36 +1493,91 @@ else:
             ),
         )
         st.plotly_chart(fig_map, width="stretch", config={"displayModeBar": False})
-        st.caption("Kích thước dấu chấm tỉ lệ với lưu lượng tàu/ngày; màu đỏ/vàng thể hiện mức sụt giảm so với nền, màu xanh là tăng.")
+
+        if corridor_summaries:
+            st.markdown(
+                f'<div class="corridor-box">{"<br/>".join(corridor_summaries[:3])}</div>',
+                unsafe_allow_html=True,
+            )
 
     with bot_c2:
         st.markdown(
-            '<div class="section-title">Đồng biến động lưu lượng điểm nghẽn đã chọn và giá nhiên liệu (chuẩn hóa = 100 tại đầu kỳ)</div>',
+            '<div class="section-title">Xu hướng biến động giá năng lượng và mức độ liên hệ với lưu lượng tàu</div>',
             unsafe_allow_html=True,
         )
         df_en_p2 = fact_energy[
             (fact_energy["calendar_date"] >= st_start) & (fact_energy["calendar_date"] <= st_end)
         ].sort_values("calendar_date").copy()
+        df_reg_p2 = fact_regime[
+            (fact_regime["portname"].isin(selected_ports_p2))
+            & (fact_regime["observation_date"] >= st_start)
+            & (fact_regime["observation_date"] <= st_end)
+        ].sort_values("observation_date").copy()
 
-        # Tự resize theo số lượng đại lượng vẽ
-        n_q4_traces = len(port_order) + 2
-        q4_height = min(560, max(320, 275 + len(port_order) * 20 + calc_legend_top_margin(n_q4_traces, 0)))
+        corr_brent_col = (
+            "rolling_corr_90d_diff7d_brent"
+            if vessel_choice == "Tanker"
+            else "rolling_corr_90d_total_diff7d_brent"
+        )
+        corr_ulsd_col = (
+            "rolling_corr_90d_diff7d_ulsd"
+            if vessel_choice == "Tanker"
+            else "rolling_corr_90d_total_diff7d_ulsd"
+        )
 
-        fig_q4 = go.Figure()
+        n_q4_traces = len(port_order) * 2 + 2
+        q4_height = min(620, max(385, 330 + len(port_order) * 22 + calc_legend_top_margin(n_q4_traces, 0)))
+
+        fig_q4 = make_subplots(
+            rows=2,
+            cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.11,
+            row_heights=[0.56, 0.44],
+            subplot_titles=(
+                "Tốc độ tăng/giảm so với ngày đầu kỳ (Đầu kỳ = 100): Tàu chạy vs Giá dầu",
+                "Mức độ biến động cùng chiều / ngược chiều giữa tàu và giá dầu (Trong 90 ngày)",
+            ),
+        )
+
         for idx, pname in enumerate(port_order):
             sub_q4 = df_win_sel[df_win_sel["portname"] == pname].sort_values("observation_date").copy()
             sub_q4["v_ma7"] = sub_q4[v_col].rolling(7, min_periods=1).mean()
             first_valid = sub_q4["v_ma7"].loc[sub_q4["v_ma7"] > 0]
             ref_v = float(first_valid.iloc[0]) if not first_valid.empty else 1.0
             sub_q4["idx_flow"] = (sub_q4["v_ma7"] / ref_v) * 100.0
+            color_p = TRACE_PALETTE[idx % len(TRACE_PALETTE)]
+
             fig_q4.add_trace(
                 go.Scatter(
                     x=sub_q4["observation_date"],
                     y=sub_q4["idx_flow"],
-                    name=f"{pname} (Idx)",
-                    line=dict(color=TRACE_PALETTE[idx % len(TRACE_PALETTE)], width=1.9),
-                )
+                    name=f"Lưu lượng {pname}",
+                    line=dict(color=color_p, width=1.9),
+                    hovertemplate=f"<b>{pname}</b>: %{{y:.1f}}% so với đầu kỳ<extra></extra>",
+                ),
+                row=1,
+                col=1,
             )
+
+            sub_reg = df_reg_p2[df_reg_p2["portname"] == pname].sort_values("observation_date")
+            if not sub_reg.empty:
+                fig_q4.add_trace(
+                    go.Scatter(
+                        x=sub_reg["observation_date"],
+                        y=sub_reg[corr_brent_col],
+                        customdata=sub_reg[corr_ulsd_col],
+                        name=f"Mức liên hệ ({pname} vs Brent)",
+                        line=dict(color=color_p, width=1.7, dash="solid"),
+                        hovertemplate=(
+                            f"<b>{pname}</b><br>Liên hệ với giá Brent: %{{y:+.2f}}<br>"
+                            "Liên hệ với giá Diesel: %{customdata:+.2f}<br>"
+                            "<i>(Âm = Tàu giảm thì giá tăng; Dương = Cùng tăng/giảm)</i><extra></extra>"
+                        ),
+                    ),
+                    row=2,
+                    col=1,
+                )
 
         brent_ref = float(df_en_p2["brent_usd_per_bbl"].iloc[0]) if not df_en_p2.empty else 1.0
         ulsd_ref = float(df_en_p2["ulsd_usd_per_gal"].iloc[0]) if not df_en_p2.empty else 1.0
@@ -1086,197 +1585,48 @@ else:
             go.Scatter(
                 x=df_en_p2["calendar_date"],
                 y=(df_en_p2["brent_usd_per_bbl"] / brent_ref) * 100.0,
-                name="Brent (Idx = 100)",
-                line=dict(color=COLOR_PRIMARY, width=2.4),
-            )
+                customdata=df_en_p2["diesel_brent_crack_bbl"],
+                name="Giá dầu Brent",
+                line=dict(color=COLOR_PRIMARY, width=2.3),
+                hovertemplate="Giá Brent: %{y:.1f}% so với đầu kỳ (Biên lọc dầu: $%{customdata:.2f}/thùng)<extra></extra>",
+            ),
+            row=1,
+            col=1,
         )
         fig_q4.add_trace(
             go.Scatter(
                 x=df_en_p2["calendar_date"],
                 y=(df_en_p2["ulsd_usd_per_gal"] / ulsd_ref) * 100.0,
-                name="Diesel ULSD (Idx = 100)",
-                line=dict(color=COLOR_TEAL, width=1.9, dash="dot"),
-            )
+                name="Giá dầu Diesel",
+                line=dict(color=COLOR_TEAL, width=1.8, dash="dot"),
+                hovertemplate="Giá Diesel: %{y:.1f}% so với đầu kỳ<extra></extra>",
+            ),
+            row=1,
+            col=1,
         )
-        fig_q4.add_hline(y=100, line_dash="dot", line_color=COLOR_SLATE)
-        add_event_bands_with_names(fig_q4, dim_events, win_min=st_start, win_max=st_end)
+        fig_q4.add_hline(y=100, line_dash="dot", line_color=COLOR_SLATE, row=1, col=1)
+        fig_q4.add_hline(y=0, line_dash="dot", line_color=COLOR_SLATE, row=2, col=1)
+        add_event_bands_with_names(fig_q4, dim_events, win_min=st_start, win_max=st_end, n_rows=2)
 
         fig_q4.update_layout(
             height=q4_height,
-            margin=dict(l=6, r=6, t=calc_legend_top_margin(n_q4_traces, 16), b=6),
-            yaxis_title="Chỉ số chuẩn hóa (Đầu kỳ = 100)",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=9.5)),
+            margin=dict(l=6, r=6, t=calc_legend_top_margin(n_q4_traces, 38), b=6),
+            legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="right", x=1, font=dict(size=9.2)),
             hovermode="x unified",
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
         )
+        fig_q4.update_annotations(font_size=10.8)
         fig_q4.update_xaxes(gridcolor=GRID_COLOR)
-        fig_q4.update_yaxes(gridcolor=GRID_COLOR)
-        st.plotly_chart(fig_q4, width="stretch", config={"displayModeBar": False})
-        st.caption("⚠️ Chỉ số trên phản ánh *đồng biến động* trong khoảng lịch đã chọn, **không kết luận quan hệ nhân quả**.")
-
-    # -----------------------------------------------------------------------
-    # [MỞ RỘNG] BỎ CRACK SPREAD — GIỮ TƯƠNG QUAN ĐỘ TRỄ, MÔ PHỎNG CHI PHÍ, CHẤT LƯỢNG DỮ LIỆU
-    # -----------------------------------------------------------------------
-    with st.expander("🔧 Mở rộng: Tương quan có độ trễ · Mô phỏng chi phí đi vòng (giả định) · Chất lượng dữ liệu"):
-        ext_tabs = st.tabs(
-            [
-                "📉 Tương quan có độ trễ (Chuỗi sai phân dừng)",
-                "🧮 Mô phỏng chi phí đi vòng (Theo giả định)",
-                "🔬 Chất lượng dữ liệu (AIS L10 & Ngày điền khuyết)",
-            ]
+        fig_q4.update_yaxes(title_text="% so với ngày đầu", gridcolor=GRID_COLOR, row=1, col=1, title_font=dict(size=9.5))
+        fig_q4.update_yaxes(
+            title_text="Mức độ liên hệ (-1 đến +1)",
+            range=[-1.0, 1.0],
+            gridcolor=GRID_COLOR,
+            row=2,
+            col=1,
+            title_font=dict(size=9.5),
         )
-
-        # Tab 1: Tương quan có độ trễ trên chuỗi sai phân dừng Δ7
-        with ext_tabs[0]:
-            st.markdown(
-                """
-                <div class="method-warn">
-                    ⚠️ <b>Cảnh báo phương pháp:</b> Tương quan tính trên <b>chuỗi sai phân tuần dừng I(0) (Δ7)</b>
-                    để tránh tương quan giả của chuỗi mức giá I(1); chỉ phản ánh <b>đồng biến động</b>, không phải nhân quả.
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            corr_port = (
-                st.selectbox("Chọn 1 điểm nghẽn trong nhóm để xem độ trễ", options=port_order, index=0)
-                if len(port_order) > 1
-                else port_order[0]
-            )
-            df_reg_p = fact_regime[
-                (fact_regime["portname"] == corr_port)
-                & (fact_regime["observation_date"] >= st_start)
-                & (fact_regime["observation_date"] <= st_end)
-            ].copy()
-
-            flow_diff_col = "n_tanker_diff_7d" if vessel_choice == "Tanker" else "n_total_diff_7d"
-            roll_brent_col = "rolling_corr_90d_diff7d_brent" if vessel_choice == "Tanker" else "rolling_corr_90d_total_diff7d_brent"
-            roll_ulsd_col = "rolling_corr_90d_diff7d_ulsd" if vessel_choice == "Tanker" else "rolling_corr_90d_total_diff7d_ulsd"
-
-            lags = list(range(-14, 15))
-            ccf_b, ccf_u = [], []
-            for k in lags:
-                sf = df_reg_p[flow_diff_col]
-                ccf_b.append(float(sf.corr(df_reg_p["brent_diff_7d"].shift(-k))) if sf.notna().sum() > 20 else 0.0)
-                ccf_u.append(float(sf.corr(df_reg_p["ulsd_diff_7d"].shift(-k))) if sf.notna().sum() > 20 else 0.0)
-
-            fig_lag = make_subplots(
-                rows=1,
-                cols=2,
-                column_widths=[0.56, 0.44],
-                subplot_titles=(
-                    f"Tương quan lăn 90d trên Δ7 ({corr_port})",
-                    "Tương quan trễ (Lag k = -14..+14 ngày)",
-                ),
-            )
-            fig_lag.add_trace(
-                go.Scatter(x=df_reg_p["observation_date"], y=df_reg_p[roll_brent_col], name="Corr 90d vs Brent Δ7", line=dict(color=COLOR_PRIMARY, width=1.8)),
-                row=1, col=1,
-            )
-            fig_lag.add_trace(
-                go.Scatter(x=df_reg_p["observation_date"], y=df_reg_p[roll_ulsd_col], name="Corr 90d vs ULSD Δ7", line=dict(color=COLOR_TEAL, width=1.6)),
-                row=1, col=1,
-            )
-            fig_lag.add_hline(y=0, line_dash="dot", line_color=COLOR_SLATE, row=1, col=1)
-            fig_lag.add_trace(go.Bar(x=lags, y=ccf_b, name="CCF Brent Δ7", marker_color=COLOR_PRIMARY), row=1, col=2)
-            fig_lag.add_trace(go.Bar(x=lags, y=ccf_u, name="CCF ULSD Δ7", marker_color=COLOR_TEAL), row=1, col=2)
-            fig_lag.update_layout(height=260, margin=dict(l=6, r=6, t=26, b=6), barmode="group", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-            fig_lag.update_xaxes(gridcolor=GRID_COLOR)
-            fig_lag.update_yaxes(gridcolor=GRID_COLOR)
-            st.plotly_chart(fig_lag, width="stretch", config={"displayModeBar": False})
-
-        # Tab 2: Mô phỏng chi phí nhiên liệu đi vòng (theo giả định)
-        with ext_tabs[1]:
-            st.caption(
-                "⚠️ **Ước tính theo giả định, không phải số đo:** Kho dữ liệu không chứa cước tàu, phụ phí BAF hay mức tiêu hao thực tế. "
-                "Người dùng tự điều chỉnh giả định để quy đổi tham khảo:"
-            )
-            s_c1, s_c2, s_c3 = st.columns(3)
-            with s_c1:
-                extra_days = st.slider(
-                    "Số ngày đi vòng thêm",
-                    min_value=5,
-                    max_value=18,
-                    value=10,
-                    help="Nguồn giả định: UNCTAD (2024) ước tính hải trình Á–Âu vòng Mũi Hảo Vọng tăng thêm ~10–14 ngày.",
-                )
-            with s_c2:
-                tons_per_day = st.slider(
-                    "Tiêu hao (tấn/ngày)",
-                    min_value=20,
-                    max_value=120,
-                    value=45,
-                    help="Nguồn giả định: IMO Fourth GHG Study (2020) cho tàu thương mại cỡ trung.",
-                )
-            with s_c3:
-                proxy_ton = round(float(fact_energy["ulsd_usd_per_gal"].iloc[-1]) * 315.0, -1)
-                fuel_price_ton = st.slider(
-                    "Giá nhiên liệu ($/tấn)",
-                    min_value=400,
-                    max_value=1200,
-                    value=int(min(max(proxy_ton, 400), 1200)),
-                    step=10,
-                    help="Quy đổi xấp xỉ từ giá ULSD mới nhất (1 tấn ≈ 315 gallon).",
-                )
-            est_cost = extra_days * tons_per_day * fuel_price_ton
-            st.markdown(
-                f"👉 **Chi phí nhiên liệu tăng thêm ước tính (theo giả định):** "
-                f"`${est_cost:,.0f} / chuyến` (`{extra_days} ngày × {tons_per_day} tấn/ngày × ${fuel_price_ton}/tấn`)."
-            )
-
-        # Tab 3: Chất lượng dữ liệu (Lỗi AIS L10 + Forward-fill)
-        with ext_tabs[2]:
-            q_c1, q_c2 = st.columns([1.1, 1.3])
-            with q_c1:
-                total_days = len(fact_energy)
-                brent_ff = int(fact_energy["brent_is_ffill"].sum())
-                ulsd_ff = int(fact_energy["ulsd_is_ffill"].sum())
-                df_l10 = fact_outlier[
-                    (fact_outlier["chokepoint_label_code"] == "L10")
-                    & (fact_outlier["portname"].isin(selected_ports_p2))
-                ].sort_values("observation_date", ascending=False)
-                st.markdown(
-                    f"""
-                    - **Lỗi cảm biến AIS trong nhóm điểm nghẽn đã chọn (`L10`):** `{len(df_l10):,}` bản ghi `port-days`
-                      (lưu lượng `n_total > 0` nhưng `capacity = 0` hoặc đóng băng tín hiệu).
-                    - **Ngày điền khuyết giá (`is_forward_filled = TRUE`):** Brent `{brent_ff:,}/{total_days:,}` ngày (`{brent_ff*100/total_days:.1f}%`),
-                      ULSD `{ulsd_ff:,}/{total_days:,}` ngày (`{ulsd_ff*100/total_days:.1f}%`). Các ngày này tạo lợi suất 1 ngày bằng `0%` nên hệ thống
-                      chỉ kiểm định ngoại lai trên phiên giao dịch thực (`is_ffill = FALSE`).
-                    """
-                )
-                st.dataframe(
-                    df_l10[
-                        [
-                            "observation_date",
-                            "portname",
-                            "n_total",
-                            "capacity",
-                            "is_ais_dwt_reporting_anomaly",
-                            "is_flatline_telemetry_anomaly",
-                        ]
-                    ].head(100),
-                    width="stretch",
-                    hide_index=True,
-                    height=180,
-                )
-
-            with q_c2:
-                df_ff = fact_energy.tail(90).copy()
-                df_ff["ret_1d"] = df_ff["brent_usd_per_bbl"].pct_change().fillna(0.0) * 100.0
-                obs_pts = df_ff[~df_ff["brent_is_ffill"]]
-                ff_pts = df_ff[df_ff["brent_is_ffill"]]
-
-                fig_ff = make_subplots(
-                    rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.10, row_heights=[0.55, 0.45],
-                    subplot_titles=("Giá Brent 90 ngày gần nhất", "Lợi suất ΔP 1 ngày (%) — Ngày điền khuyết = 0%"),
-                )
-                fig_ff.add_trace(go.Scatter(x=df_ff["calendar_date"], y=df_ff["brent_usd_per_bbl"], name="Giá Brent", line=dict(color=COLOR_SLATE, width=1.4)), row=1, col=1)
-                fig_ff.add_trace(go.Scatter(x=ff_pts["calendar_date"], y=ff_pts["brent_usd_per_bbl"], mode="markers", name="Ngày điền khuyết LOCF", marker=dict(color=COLOR_AMBER, size=6, symbol="diamond")), row=1, col=1)
-                fig_ff.add_trace(go.Bar(x=obs_pts["calendar_date"], y=obs_pts["ret_1d"], name="Phiên thực (ΔP ≠ 0)", marker_color=COLOR_PRIMARY), row=2, col=1)
-                fig_ff.add_trace(go.Scatter(x=ff_pts["calendar_date"], y=ff_pts["ret_1d"], mode="markers", name="Điền khuyết (ΔP = 0%)", marker=dict(color=COLOR_AMBER, size=6, symbol="diamond")), row=2, col=1)
-                fig_ff.update_layout(height=275, margin=dict(l=6, r=6, t=22, b=6), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", showlegend=False)
-                fig_ff.update_xaxes(gridcolor=GRID_COLOR)
-                fig_ff.update_yaxes(gridcolor=GRID_COLOR)
-                st.plotly_chart(fig_ff, width="stretch", config={"displayModeBar": False})
+        st.plotly_chart(fig_q4, width="stretch", config={"displayModeBar": False})
 
     render_shared_footer()
