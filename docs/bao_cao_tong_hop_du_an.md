@@ -1,4 +1,4 @@
-# BÁO CÁO TIẾN ĐỘ DỰ ÁN TỐT NGHIỆP - MARITIME ENERGY MONITOR
+# BÁO CÁO TIẾN ĐỘ DỰ ÁN  - MARITIME ENERGY MONITOR
 ## HỆ THỐNG GIÁM SÁT ĐIỂM NGHẼN HÀNG HẢI & DỰ BÁO BIẾN ĐỘNG NĂNG LƯỢNG TOÀN CẦU (OIL MONITOR)
 
 *(Tài liệu tuân thủ cấu trúc báo cáo của bộ môn Xử lý Dữ liệu và Quy trình phân tích 7 bước)*
